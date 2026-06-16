@@ -637,3 +637,89 @@ def test_user_defined_custom_provider_not_filtered_against_itself():
     assert row["total_models"] == 3
     assert row["models"] == ["kr/claude-opus-4.8", "ocg/glm-5", "ocg/kimi-k2.6"]
 
+
+def test_custom_local_endpoint_survives_while_aggregator_deduped():
+    """The reported desktop scenario: a local custom endpoint (MLX/vLLM at
+    127.0.0.1, slug ``custom:<name>``) is configured alongside a built-in
+    aggregator. The fix must do BOTH at once:
+
+      1. keep the custom provider's full catalog (the regression — it must
+         not be filtered against itself), and
+      2. still dedup the aggregator against the custom provider's models
+         (the #45954 behavior the fix must not break).
+
+    This is the combined invariant that guards against either direction
+    regressing: never zero a user endpoint, never stop trimming aggregators.
+    """
+    rows = [
+        {
+            "slug": "custom:local-mlx",
+            "name": "local-mlx",
+            "models": ["mlx-community/Qwen3-30B", "mlx-community/Llama-3.3-70B"],
+            "total_models": 2,
+            "is_current": True,
+            "is_user_defined": True,
+            "source": "user-config",
+        },
+        _aggregator_row("openrouter", [
+            "mlx-community/Qwen3-30B",          # overlaps the local endpoint
+            "anthropic/claude-sonnet-4.6",      # unique to the aggregator
+        ]),
+    ]
+    ctx = _empty_ctx()
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx)
+
+    custom_row = next(
+        r for r in payload["providers"] if r["slug"] == "custom:local-mlx"
+    )
+    or_row = next(r for r in payload["providers"] if r["slug"] == "openrouter")
+
+    # (1) custom endpoint keeps its full catalog — not zeroed, not trimmed
+    assert custom_row["total_models"] == 2
+    assert custom_row["models"] == [
+        "mlx-community/Qwen3-30B",
+        "mlx-community/Llama-3.3-70B",
+    ]
+    # (2) aggregator still deduped against the custom provider's models
+    assert or_row["models"] == ["anthropic/claude-sonnet-4.6"]
+    assert or_row["total_models"] == 1
+
+
+def test_two_custom_providers_with_overlap_both_survive():
+    """Two user-defined custom endpoints that happen to expose an
+    overlapping model must each keep their full catalog. Neither is the
+    aggregator the dedup exists to trim, so cross-filtering between them
+    must not happen.
+    """
+    rows = [
+        {
+            "slug": "custom:proxy-a",
+            "name": "proxy-a",
+            "models": ["shared/model", "a/only"],
+            "total_models": 2,
+            "is_current": False,
+            "is_user_defined": True,
+            "source": "user-config",
+        },
+        {
+            "slug": "custom:proxy-b",
+            "name": "proxy-b",
+            "models": ["shared/model", "b/only"],
+            "total_models": 2,
+            "is_current": True,
+            "is_user_defined": True,
+            "source": "user-config",
+        },
+    ]
+    ctx = _empty_ctx()
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx)
+
+    a_row = next(r for r in payload["providers"] if r["slug"] == "custom:proxy-a")
+    b_row = next(r for r in payload["providers"] if r["slug"] == "custom:proxy-b")
+    assert a_row["models"] == ["shared/model", "a/only"]
+    assert b_row["models"] == ["shared/model", "b/only"]
+    assert a_row["total_models"] == 2
+    assert b_row["total_models"] == 2
+
