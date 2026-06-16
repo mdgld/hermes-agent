@@ -1,4 +1,4 @@
-name: E2E — Windows Desktop
+name: E2E Windows Desktop
 
 on:
   push:
