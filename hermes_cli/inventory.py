@@ -178,6 +178,15 @@ def build_models_payload(
                 user_models.update(m.lower() for m in (row.get("models") or []))
         if user_models:
             for row in rows:
+                # Never trim a user-defined row. It is the "more-specific"
+                # source that seeded user_models in the first place; filtering
+                # it against that set cancels it against its own catalog and
+                # zeroes the count. This bit named custom_providers whose slug
+                # (``custom:<name>``) classifies as an aggregator — e.g. a
+                # 9router endpoint showed "(0 models)" in the /model picker
+                # while ``hermes model`` (which skips this dedup) showed 437.
+                if row.get("is_user_defined"):
+                    continue
                 slug = row.get("slug", "")
                 if not _is_aggregator(slug):
                     continue

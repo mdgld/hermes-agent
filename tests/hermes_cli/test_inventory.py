@@ -606,3 +606,34 @@ def test_aggregator_dedup_multiple_user_providers():
     assert or_row["models"] == ["model-z"]
     assert or_row["total_models"] == 1
 
+
+def test_user_defined_custom_provider_not_filtered_against_itself():
+    """A user-defined provider whose slug classifies as an aggregator
+    (``custom:<name>``, e.g. a 9router endpoint) must NOT have its own
+    catalog filtered against ``user_models``.
+
+    Regression: ``is_aggregator()`` returns True for any ``custom:`` slug,
+    so the dedup loop trimmed the user-defined row against a set seeded
+    from its own models, zeroing the count. The picker showed
+    "9router.digitalbroadcast.id (0 models)" while ``hermes model``
+    (which skips this dedup path) showed the full 437.
+    """
+    rows = [
+        {
+            "slug": "custom:9router.digitalbroadcast.id",
+            "name": "9router.digitalbroadcast.id",
+            "models": ["kr/claude-opus-4.8", "ocg/glm-5", "ocg/kimi-k2.6"],
+            "total_models": 3,
+            "is_current": True,
+            "is_user_defined": True,
+            "source": "user-config",
+        },
+    ]
+    ctx = _empty_ctx()
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx)
+
+    row = payload["providers"][0]
+    assert row["total_models"] == 3
+    assert row["models"] == ["kr/claude-opus-4.8", "ocg/glm-5", "ocg/kimi-k2.6"]
+
