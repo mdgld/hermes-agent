@@ -1239,7 +1239,7 @@ def cmd_toggle() -> None:
 def _run_composite_ui(curses, plugin_names, plugin_labels, plugin_selected,
                       disabled, categories, console):
     """Custom curses screen with checkboxes + category action rows."""
-    from hermes_cli.curses_ui import flush_stdin
+    from hermes_cli.curses_ui import flush_stdin, _decode_menu_key, NAV_CANCEL, NAV_UP, NAV_DOWN
 
     chosen = set(plugin_selected)
     n_plugins = len(plugin_names)
@@ -1459,10 +1459,24 @@ def _run_composite_ui(curses, plugin_names, plugin_labels, plugin_selected,
                         except Exception:
                             pass
                         stdscr.clear()
-            elif key in {27, ord("q")}:
-                # Save plugin changes on exit
+            elif key == ord("q"):
                 result_holder["plugins_changed"] = True
                 return
+            elif key == 27:
+                # Use _decode_menu_key to distinguish a lone ESC (quit) from an
+                # arrow-key ESC sequence (ESC [ A/B). The inner curses.wrapper
+                # for sub-screens calls keypad(0) on exit, briefly leaving the
+                # terminal in normal keypad mode where arrow keys arrive as raw
+                # ESC bytes instead of curses.KEY_UP/DOWN.
+                nav = _decode_menu_key(stdscr, key)
+                if nav == NAV_CANCEL:
+                    result_holder["plugins_changed"] = True
+                    return
+                elif nav == NAV_UP and total_items > 0:
+                    cursor = (cursor - 1) % total_items
+                elif nav == NAV_DOWN and total_items > 0:
+                    cursor = (cursor + 1) % total_items
+                # NAV_NONE = unknown sequence, ignore and redraw
 
     curses.wrapper(_draw)
     flush_stdin()
