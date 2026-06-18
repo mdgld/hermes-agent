@@ -58,6 +58,37 @@ _bedrock_runtime_client_cache: Dict[str, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
 
 
+def ensure_bedrock_bearer_token_env() -> None:
+    """Load AWS_BEARER_TOKEN_BEDROCK from ~/.hermes/.env when not exported.
+
+    Botocore supports Bedrock API-key auth through the AWS_BEARER_TOKEN_BEDROCK
+    environment variable. Hermes users commonly save keys in ~/.hermes/.env,
+    but boto3 only reads os.environ, so bridge that file-backed key into the
+    process before constructing Bedrock clients.
+    """
+    if os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+        return
+    try:
+        from hermes_constants import get_hermes_home
+        env_path = get_hermes_home() / ".env"
+        if not env_path.exists():
+            return
+        for raw_line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != "AWS_BEARER_TOKEN_BEDROCK":
+                continue
+            value = value.strip().strip('"').strip("'")
+            if value:
+                os.environ["AWS_BEARER_TOKEN_BEDROCK"] = value
+            return
+    except Exception:
+        logger.debug("Unable to load AWS_BEARER_TOKEN_BEDROCK from .env", exc_info=True)
+
+
+
 _MIN_BOTO3_VERSION = (1, 34, 59)
 
 
@@ -94,6 +125,7 @@ def _get_bedrock_runtime_client(region: str):
     Uses the default AWS credential chain (env vars → profile → instance role).
     """
     if region not in _bedrock_runtime_client_cache:
+        ensure_bedrock_bearer_token_env()
         boto3 = _require_boto3()
         _bedrock_runtime_client_cache[region] = boto3.client(
             "bedrock-runtime", region_name=region,
@@ -104,6 +136,7 @@ def _get_bedrock_runtime_client(region: str):
 def _get_bedrock_control_client(region: str):
     """Get or create a cached ``bedrock`` control-plane client for model discovery."""
     if region not in _bedrock_control_client_cache:
+        ensure_bedrock_bearer_token_env()
         boto3 = _require_boto3()
         _bedrock_control_client_cache[region] = boto3.client(
             "bedrock", region_name=region,
@@ -934,6 +967,7 @@ def build_converse_kwargs(
     top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
     guardrail_config: Optional[Dict] = None,
+    reasoning_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build kwargs for ``bedrock-runtime.converse()`` or ``converse_stream()``.
 
@@ -983,6 +1017,11 @@ def build_converse_kwargs(
     if guardrail_config:
         kwargs["guardrailConfig"] = guardrail_config
 
+    # Do not send Claude thinking/reasoning fields on regular Bedrock until the
+    # exact Converse payload contract is confirmed for these model/profile IDs.
+    # Unsupported fields here cause ValidationException and make the router fall
+    # back away from Bedrock, hiding actual Bedrock usage.
+
     return kwargs
 
 
@@ -996,6 +1035,7 @@ def call_converse(
     top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
     guardrail_config: Optional[Dict] = None,
+    reasoning_config: Optional[Dict[str, Any]] = None,
 ) -> SimpleNamespace:
     """Call Bedrock Converse API (non-streaming) and return an OpenAI-compatible response.
 
@@ -1011,6 +1051,7 @@ def call_converse(
         top_p=top_p,
         stop_sequences=stop_sequences,
         guardrail_config=guardrail_config,
+        reasoning_config=reasoning_config,
     )
 
     try:

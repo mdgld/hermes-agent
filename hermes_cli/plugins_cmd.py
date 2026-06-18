@@ -1417,6 +1417,11 @@ def _run_composite_ui(curses, plugin_names, plugin_labels, plugin_selected,
                             curses.init_pair(3, curses.COLOR_CYAN, -1)
                             curses.init_pair(4, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)
                         curses.curs_set(0)
+                        try:
+                            curses.flushinp()
+                        except Exception:
+                            pass
+                        stdscr.clear()
             elif key in {curses.KEY_ENTER, 10, 13}:
                 if cursor < n_plugins:
                     # ENTER on a plugin checkbox — confirm and exit
@@ -1449,6 +1454,11 @@ def _run_composite_ui(curses, plugin_names, plugin_labels, plugin_selected,
                             curses.init_pair(3, curses.COLOR_CYAN, -1)
                             curses.init_pair(4, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)
                         curses.curs_set(0)
+                        try:
+                            curses.flushinp()
+                        except Exception:
+                            pass
+                        stdscr.clear()
             elif key in {27, ord("q")}:
                 # Save plugin changes on exit
                 result_holder["plugins_changed"] = True
