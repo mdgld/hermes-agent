@@ -44,6 +44,7 @@ class BedrockTransport(ProviderTransport):
             max_tokens: int — output token limit (default 4096)
             temperature: float | None
             guardrail_config: dict | None — Bedrock guardrails
+            reasoning_config: ignored for regular Bedrock until supported payload is confirmed
             region: str — AWS region (default 'us-east-1')
         """
         from agent.bedrock_adapter import build_converse_kwargs
@@ -58,6 +59,7 @@ class BedrockTransport(ProviderTransport):
             max_tokens=params.get("max_tokens", 4096),
             temperature=params.get("temperature"),
             guardrail_config=guardrail,
+            reasoning_config=params.get("reasoning_config"),
         )
         # Sentinel keys for dispatch — agent pops these before the boto3 call
         kwargs["__bedrock_converse__"] = True

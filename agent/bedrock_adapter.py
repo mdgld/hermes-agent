@@ -1017,10 +1017,25 @@ def build_converse_kwargs(
     if guardrail_config:
         kwargs["guardrailConfig"] = guardrail_config
 
-    # Do not send Claude thinking/reasoning fields on regular Bedrock until the
-    # exact Converse payload contract is confirmed for these model/profile IDs.
-    # Unsupported fields here cause ValidationException and make the router fall
-    # back away from Bedrock, hiding actual Bedrock usage.
+    # Adaptive thinking via additionalModelRequestFields.
+    # Claude 4.x on Bedrock uses thinking.type="adaptive" + output_config.effort.
+    # Opus 4.7/4.8: only "adaptive" supported; "enabled"/budget_tokens → 400.
+    # Sonnet 4.6: "adaptive" recommended; "enabled"+budget_tokens deprecated.
+    # effort lives in output_config (NOT inside the thinking object).
+    if reasoning_config and is_anthropic_bedrock_model(model):
+        thinking_type = reasoning_config.get("type", "adaptive")
+        amrf = kwargs.setdefault("additionalModelRequestFields", {})
+        amrf["thinking"] = {"type": thinking_type}
+        if thinking_type == "enabled":
+            budget = reasoning_config.get("budget_tokens")
+            if budget:
+                amrf["thinking"]["budget_tokens"] = budget
+        effort = reasoning_config.get("effort")
+        if effort:
+            # Normalize router-internal levels to Bedrock's accepted vocabulary.
+            # xhigh is router shorthand for "stronger than high" → max on Bedrock.
+            _EFFORT_MAP = {"xhigh": "max"}
+            amrf.setdefault("output_config", {})["effort"] = _EFFORT_MAP.get(effort, effort)
 
     return kwargs
 
