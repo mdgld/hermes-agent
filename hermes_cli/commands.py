@@ -234,6 +234,14 @@ COMMAND_REGISTRY: list[CommandDef] = [
     # Exit
     CommandDef("quit", "Exit the CLI (use --delete to also remove session history)", "Exit",
                cli_only=True, aliases=("exit",), args_hint="[--delete]"),
+
+    #Model Router
+    CommandDef("t1", "Pin session to the configured T1 slot — disables auto-routing until /auto", "Configuration"),
+    CommandDef("t2", "Pin session to the configured T2 slot — disables auto-routing until /auto", "Configuration"),
+    CommandDef("t3", "Pin session to the configured T3 slot — disables auto-routing until /auto", "Configuration"),
+    CommandDef("t4", "Pin session to the configured T4 slot — disables auto-routing until /auto", "Configuration"),
+    CommandDef("t5", "Pin session to the configured T5 slot — disables auto-routing until /auto", "Configuration"),
+    CommandDef("auto", "Resume auto model routing (undo /model or /t1-/t5 pin for this session)", "Configuration"),
 ]
 
 

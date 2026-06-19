@@ -7100,6 +7100,91 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     else f"    {line}")
         if result.success and result.requires_new_session:
             _cprint("    Tip: `/reset` starts a new session immediately.")
+    def _handle_tier_pin(self, tier_cmd: str) -> None:
+        """/t1 /t2 /t3 /t4 /t5 — pin session to a specific model tier.
+
+        Immediately switches the model and pins auto-routing off for the
+        entire session. Use /auto to re-enable auto-routing.
+        """
+        tier_map = {"t1": 1, "t2": 2, "t3": 3, "t4": 4, "t5": 5}
+        tier_num = tier_map.get(tier_cmd.lstrip("/").lower())
+        if tier_num is None:
+            _cprint(f"  ✗ Unknown tier command: /{tier_cmd}")
+            return
+
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            _mgr = get_plugin_manager()
+            _apply_fn = getattr(_mgr, "router_apply_tier", None)
+            _meta_fn = getattr(_mgr, "router_get_tier_meta", None)
+            if _apply_fn is None and hasattr(_mgr, "discover_and_load"):
+                _mgr.discover_and_load()
+                _apply_fn = getattr(_mgr, "router_apply_tier", None)
+                _meta_fn = getattr(_mgr, "router_get_tier_meta", None)
+            if _apply_fn is None:
+                _cprint("  ✗ model-router plugin not active — /t1-/t5 unavailable")
+                _cprint("    Enable it: add 'model-router' to plugins.enabled in config.yaml")
+                return
+
+            current_model = (
+                getattr(self.agent, "model", None) if self.agent else None
+            ) or self.model or ""
+            session_id = self.session_id or ""
+
+            _apply_fn(session_id, tier_num, current_model)
+
+            # Reflect the tier chosen by the plugin using the active router config
+            # instead of baked-in model slugs.
+            meta = _meta_fn(tier_num) if _meta_fn else {}
+            new_model = meta.get("model")
+            if not new_model:
+                _cprint(f"  ✗ Tier T{tier_num} is not configured correctly in model_router.yaml")
+                _cprint("    Fix the active profile router config or re-run install.sh, then try again.")
+                return
+            reasoning = meta.get("reasoning")
+            tier_label = meta.get("label") or f"T{tier_num}"
+            if reasoning:
+                tier_label += f" (reasoning={reasoning})"
+            if self.agent:
+                self.agent.model = new_model
+            self.model = new_model
+
+            _cprint(f"  ✓ Pinned to {tier_label} ({new_model})")
+            _cprint("    Auto-routing paused for this session. Use /auto to resume.")
+
+        except Exception as exc:
+            _cprint(f"  ✗ Failed to switch tier: {exc}")
+
+    def _handle_auto_routing(self) -> None:
+        """/auto — resume auto model routing after a /model or /t1-/t5 pin."""
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            _mgr = get_plugin_manager()
+            _unpin_fn = getattr(_mgr, "router_unpin_session", None)
+            _is_pinned_fn = getattr(_mgr, "router_is_pinned", None)
+            if _unpin_fn is None and hasattr(_mgr, "discover_and_load"):
+                _mgr.discover_and_load()
+                _unpin_fn = getattr(_mgr, "router_unpin_session", None)
+                _is_pinned_fn = getattr(_mgr, "router_is_pinned", None)
+
+            if _unpin_fn is None:
+                _cprint("  ✗ model-router plugin not active — /auto unavailable")
+                _cprint("    Enable it: add 'model-router' to plugins.enabled in config.yaml")
+                return
+
+            session_id = self.session_id or ""
+            was_pinned = _is_pinned_fn(session_id) if _is_pinned_fn else False
+            _unpin_fn(session_id)
+
+            if was_pinned:
+                _cprint("  ✓ Auto model routing resumed")
+                _cprint("    Next turn will be classified by Flash and routed automatically.")
+            else:
+                _cprint("  ✓ Auto routing already active (no pin was set)")
+
+        except Exception as exc:
+            _cprint(f"  ✗ Failed to resume auto routing: {exc}")
+
 
     def _should_handle_model_command_inline(self, text: str, has_images: bool = False) -> bool:
         """Return True when /model should be handled immediately on the UI thread."""
@@ -7426,6 +7511,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._handle_sessions_command(cmd_original)
         elif canonical == "model":
             self._handle_model_switch(cmd_original)
+        elif canonical in ("t1", "t2", "t3", "t4", "t5"):
+            self._handle_tier_pin(canonical)
+        elif canonical == "auto":
+            self._handle_auto_routing()
         elif canonical == "codex-runtime":
             self._handle_codex_runtime(cmd_original)
         elif canonical == "gquota":
@@ -10005,6 +10094,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # Refresh provider credentials if needed (handles key rotation transparently)
         if not self._ensure_runtime_credentials():
             return None
+        # Ensure plugin manager has a CLI reference even in non-interactive
+        # (single-query / -q) mode where run() is never called.
+        # This is required for model-router and other plugins that access
+        # the agent via ctx._manager._cli_ref.
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            _pm = get_plugin_manager()
+            if _pm._cli_ref is None:
+                _pm._cli_ref = self
+        except Exception:
+            pass
+
 
         turn_route = self._resolve_turn_agent_config(message)
         if turn_route["signature"] != self._active_agent_route_signature:

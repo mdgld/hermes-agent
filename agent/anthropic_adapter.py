@@ -55,7 +55,7 @@ def _get_anthropic_sdk():
 
 logger = logging.getLogger(__name__)
 
-THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000}
+THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000, "adaptive": 8000, "max": 32000}
 # Hermes effort → Anthropic adaptive-thinking effort (output_config.effort).
 # Anthropic exposes 5 levels on 4.7+: low, medium, high, xhigh, max.
 # Opus/Sonnet 4.6 only expose 4 levels: low, medium, high, max — no xhigh.
@@ -65,6 +65,7 @@ THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000}
 # maps to low on every model.  See:
 # https://platform.claude.com/docs/en/about-claude/models/migration-guide
 ADAPTIVE_EFFORT_MAP = {
+    "adaptive": "adaptive",
     "max":     "max",
     "xhigh":   "xhigh",
     "high":    "high",
@@ -647,6 +648,9 @@ def _build_anthropic_client_with_bearer_hook(
     ``auth_token`` is set — but the hook overrides it per-request so
     the placeholder value never reaches Azure.
     """
+    from agent.bedrock_adapter import ensure_bedrock_bearer_token_env
+    ensure_bedrock_bearer_token_env()
+
     _anthropic_sdk = _get_anthropic_sdk()
     if _anthropic_sdk is None:
         raise ImportError(
@@ -2449,13 +2453,17 @@ def build_anthropic_kwargs(
                     "display": "summarized",
                 }
                 adaptive_effort = ADAPTIVE_EFFORT_MAP.get(effort, "medium")
-                # Downgrade xhigh→max on models that don't list xhigh as a
-                # supported level (Opus/Sonnet 4.6). Opus 4.7+ keeps xhigh.
-                if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model):
-                    adaptive_effort = "max"
-                kwargs["output_config"] = {
-                    "effort": adaptive_effort,
-                }
+                # Literal adaptive leaves effort unset so Claude dynamically
+                # determines how much thinking to use. Named efforts still map
+                # to Anthropic output_config.effort.
+                if adaptive_effort != "adaptive":
+                    # Downgrade xhigh→max on models that don't list xhigh as a
+                    # supported level (Opus/Sonnet 4.6). Opus 4.7+ keeps xhigh.
+                    if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model):
+                        adaptive_effort = "max"
+                    kwargs["output_config"] = {
+                        "effort": adaptive_effort,
+                    }
             else:
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
                 # Anthropic requires temperature=1 when thinking is enabled on older models

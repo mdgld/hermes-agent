@@ -1527,12 +1527,16 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         # that returns an empty base_url string.
         if base_url:
             agent.base_url = base_url
+        else:
+            agent.base_url = None
         agent.api_mode = api_mode
         # Invalidate transport cache — new api_mode may need a different transport
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
+        current_api_key = getattr(agent, "api_key", "")
         if api_key:
             agent.api_key = api_key
+            current_api_key = api_key
 
         # ── Build new client ──
         if api_mode == "anthropic_messages":
@@ -1545,7 +1549,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             # Other anthropic_messages providers (MiniMax, Alibaba, etc.) must use their own
             # API key — falling back would send Anthropic credentials to third-party endpoints.
             _is_native_anthropic = new_provider == "anthropic"
-            effective_key = (api_key or agent.api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or agent.api_key or "")
+            effective_key = (api_key or current_api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or current_api_key or "")
 
             # MiniMax OAuth: swap static string for a per-request callable token
             # provider so the rebuilt client survives 15-min token expiry. See
@@ -1563,6 +1567,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
                     )
 
             agent.api_key = effective_key
+            current_api_key = effective_key
             agent._anthropic_api_key = effective_key
             agent._anthropic_base_url = base_url or getattr(agent, "_anthropic_base_url", None)
             agent._anthropic_client = build_anthropic_client(
@@ -1594,7 +1599,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
                 agent._bedrock_region = "us-east-1"
                 agent._bedrock_guardrail_config = None
         else:
-            effective_key = api_key or agent.api_key
+            effective_key = api_key or current_api_key
             effective_base = base_url or agent.base_url
             agent._client_kwargs = {
                 "api_key": effective_key,
@@ -1655,7 +1660,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         # string for its live-probe paths; for Foundry the context
         # length normally resolves via config or static catalogs and
         # never hits a probe, but coerce to empty string defensively.
-        _ctx_api_key = agent.api_key if isinstance(agent.api_key, str) else ""
+        _ctx_api_key = current_api_key if isinstance(current_api_key, str) else ""
         new_context_length = get_model_context_length(
             agent.model,
             base_url=agent.base_url,
@@ -1668,7 +1673,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             model=agent.model,
             context_length=new_context_length,
             base_url=agent.base_url,
-            api_key=agent.api_key,  # context_compressor forwards to call_llm; callable preserved
+            api_key=current_api_key,  # context_compressor forwards to call_llm; callable preserved
             provider=agent.provider,
             api_mode=agent.api_mode,
         )

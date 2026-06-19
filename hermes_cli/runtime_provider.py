@@ -1644,6 +1644,7 @@ def resolve_runtime_provider(
             resolve_aws_auth_env_var,
             resolve_bedrock_region,
             is_anthropic_bedrock_model,
+            ensure_bedrock_bearer_token_env,
         )
         # When the user explicitly selected bedrock (not auto-detected),
         # trust boto3's credential chain — it handles IMDS, ECS task roles,
@@ -1663,7 +1664,9 @@ def resolve_runtime_provider(
         _bedrock_cfg = load_config().get("bedrock", {})
         # Region priority: config.yaml bedrock.region → env var → us-east-1
         region = (_bedrock_cfg.get("region") or "").strip() or resolve_bedrock_region()
-        auth_source = resolve_aws_auth_env_var() or "aws-sdk-default-chain"
+        ensure_bedrock_bearer_token_env()
+        bedrock_bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+        auth_source = "AWS_BEARER_TOKEN_BEDROCK" if bedrock_bearer_token else (resolve_aws_auth_env_var() or "aws-sdk-default-chain")
         # Build guardrail config if configured
         _gr = _bedrock_cfg.get("guardrail", {})
         guardrail_config = None
@@ -1680,8 +1683,8 @@ def resolve_runtime_provider(
         # feature parity (prompt caching, thinking budgets, adaptive thinking).
         # Non-Claude models use the Converse API for multi-model support.
         _current_model = str(model_cfg.get("default") or "").strip()
-        if is_anthropic_bedrock_model(_current_model):
-            # Claude on Bedrock → AnthropicBedrock SDK → anthropic_messages path
+        if is_anthropic_bedrock_model(_current_model) and not bedrock_bearer_token:
+            # Claude on Bedrock with AWS SigV4 creds → AnthropicBedrock SDK → anthropic_messages path
             runtime = {
                 "provider": "bedrock",
                 "api_mode": "anthropic_messages",

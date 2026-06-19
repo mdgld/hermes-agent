@@ -2049,6 +2049,43 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _auto_subscribe_defaults(conn: sqlite3.Connection, task_id: str) -> None:
+    """Subscribe ``kanban.default_notification_subscribers`` to *task_id*.
+
+    Reads the config list once, silently skips entries that are missing
+    ``platform`` or ``chat_id``, and logs (but never raises) on failure
+    so a bad subscriber row can't block task creation.
+    """
+    try:
+        from hermes_cli.config import load_config
+        kanban_cfg = load_config().get("kanban") or {}
+        subs = kanban_cfg.get("default_notification_subscribers") or []
+        if not subs:
+            return
+        for entry in subs:
+            if not isinstance(entry, dict):
+                continue
+            platform = str(entry.get("platform", "")).strip()
+            chat_id = str(entry.get("chat_id", "")).strip()
+            if not platform or not chat_id:
+                continue
+            add_notify_sub(
+                conn,
+                task_id=task_id,
+                platform=platform,
+                chat_id=chat_id,
+                thread_id=entry.get("thread_id") or None,
+                user_id=entry.get("user_id") or None,
+                notifier_profile=entry.get("notifier_profile") or None,
+            )
+    except Exception:
+        # Never let a config/subscribe issue block task creation.
+        import logging
+        logging.getLogger(__name__).debug(
+            "auto-subscribe defaults failed for %s", task_id, exc_info=True,
+        )
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -2280,6 +2317,10 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                     },
                 )
+            # Auto-subscribe default notification sources so every new
+            # task — CLI, agent, or gateway — gets the same baseline
+            # notifications without callers having to remember.
+            _auto_subscribe_defaults(conn, task_id)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:

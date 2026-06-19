@@ -591,6 +591,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             max_tokens=agent.max_tokens or 4096,
             region=region,
             guardrail_config=guardrail,
+            reasoning_config=agent.reasoning_config,
         )
 
     if agent.api_mode == "codex_responses":

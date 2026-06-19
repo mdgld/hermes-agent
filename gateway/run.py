@@ -7612,6 +7612,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "model":
             return await self._handle_model_command(event)
 
+        if canonical in ("t1", "t2", "t3", "t4", "t5"):
+            return await self._handle_tier_pin_command(event)
+
+        if canonical == "auto":
+            return await self._handle_auto_command(event)
+
         if canonical == "codex-runtime":
             return await self._handle_codex_runtime_command(event)
 

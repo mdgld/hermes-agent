@@ -57,12 +57,12 @@ def _make_agent_anthropic():
     agent.provider = "anthropic"
     agent.model = "claude-sonnet-4-5"
     agent.base_url = "https://api.anthropic.com"
-    agent.api_key = "sk-ant-original"
+    agent.api_key = "***"
     agent.api_mode = "anthropic_messages"
     agent.client = None
     agent._client_kwargs = {}
     agent.context_compressor = None
-    agent._anthropic_api_key = "sk-ant-original"
+    agent._anthropic_api_key = "***"
     agent._anthropic_base_url = "https://api.anthropic.com"
     agent._anthropic_client = MagicMock(name="OriginalAnthropicClient")
     agent._is_anthropic_oauth = False
@@ -73,6 +73,10 @@ def _make_agent_anthropic():
     agent._fallback_chain = []
     agent._fallback_model = None
     agent._config_context_length = None
+    setattr(agent, "_anthropic_prompt_cache_policy", lambda **_kw: (False, False))
+    setattr(agent, "_ensure_lmstudio_runtime_loaded", lambda config_context_length=None: None)
+    setattr(agent, "_use_prompt_caching", False)
+    setattr(agent, "_use_native_cache_layout", False)
 
     return agent
 
@@ -182,23 +186,42 @@ def test_cross_branch_anthropic_to_openai_rebuild_failure_rolls_back():
     assert agent.base_url == "https://api.anthropic.com"
 
 
-def test_successful_switch_still_works_after_rollback_refactor():
-    """Sanity check: the try/except wrapper hasn't broken the happy path."""
-    agent = _make_agent_openrouter()
+def test_bedrock_switch_model_works_without_agent_api_key_attribute():
+    """Bedrock agents may not expose api_key; switching must still succeed."""
+    agent = AIAgent.__new__(AIAgent)
+    setattr(agent, "provider", "bedrock")
+    setattr(agent, "model", "anthropic.claude-sonnet-4-6")
+    setattr(agent, "base_url", "")
+    setattr(agent, "api_mode", "bedrock_converse")
+    setattr(agent, "client", None)
+    setattr(agent, "_client_kwargs", {})
+    setattr(agent, "context_compressor", None)
+    setattr(agent, "_cached_system_prompt", "cached")
+    setattr(agent, "_primary_runtime", {})
+    setattr(agent, "_fallback_activated", False)
+    setattr(agent, "_fallback_index", 0)
+    setattr(agent, "_fallback_chain", [])
+    setattr(agent, "_fallback_model", None)
+    setattr(agent, "_config_context_length", None)
+    setattr(agent, "_anthropic_prompt_cache_policy", lambda **_kw: (False, False))
+    setattr(agent, "_ensure_lmstudio_runtime_loaded", lambda config_context_length=None: None)
+    setattr(agent, "_use_prompt_caching", False)
+    setattr(agent, "_use_native_cache_layout", False)
 
-    new_client = MagicMock(name="NewClient")
-    agent._create_openai_client = lambda *_a, **_kw: new_client
-
+    # Deliberately do NOT set agent.api_key.
     with patch("hermes_cli.timeouts.get_provider_request_timeout", return_value=None):
         agent.switch_model(
-            new_model="openai/gpt-5",
-            new_provider="openrouter",
-            api_key="or-key-new",
-            base_url="https://openrouter.ai/api/v1",
-            api_mode="chat_completions",
+            new_model="anthropic.claude-sonnet-4-6",
+            new_provider="bedrock",
+            api_key="",
+            base_url="",
+            api_mode="bedrock_converse",
         )
 
-    assert agent.model == "openai/gpt-5"
-    assert agent.provider == "openrouter"
-    assert agent.api_key == "or-key-new"
-    assert agent.client is new_client
+    assert getattr(agent, "model", None) == "anthropic.claude-sonnet-4-6"
+    assert getattr(agent, "provider", None) == "bedrock"
+    assert getattr(agent, "api_mode", None) == "bedrock_converse"
+    assert getattr(agent, "_client_kwargs", None) == {}
+    assert getattr(agent, "api_key", "") == ""
+
+

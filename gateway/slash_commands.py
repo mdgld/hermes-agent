@@ -3828,3 +3828,125 @@ class GatewaySlashCommandsMixin:
 
         self._schedule_update_notification_watch()
         return t("gateway.update.starting")
+
+    # -- Model Router tier commands (/t1-/t5, /auto) --------------------------
+
+    async def _handle_tier_pin_command(self, event: MessageEvent) -> str:
+        """Handle /t1 /t2 /t3 /t4 /t5 — pin session to a specific model tier.
+
+        Immediately switches the model and pins auto-routing off for the
+        entire session.  Use /auto to re-enable auto-routing.
+        """
+        cmd_name = (event.get_command() or "").strip().lower().lstrip("/")
+        tier_map = {"t1": 1, "t2": 2, "t3": 3, "t4": 4, "t5": 5}
+        tier_num = tier_map.get(cmd_name)
+        if tier_num is None:
+            return f"✗ Unknown tier command: /{cmd_name}"
+
+        try:
+            from hermes_cli.plugins import get_plugin_manager as _get_pm
+            _mgr = _get_pm()
+            _apply_fn = getattr(_mgr, "router_apply_tier", None)
+            _meta_fn = getattr(_mgr, "router_get_tier_meta", None)
+            if _apply_fn is None and hasattr(_mgr, "discover_and_load"):
+                _mgr.discover_and_load()
+                _apply_fn = getattr(_mgr, "router_apply_tier", None)
+                _meta_fn = getattr(_mgr, "router_get_tier_meta", None)
+            if _apply_fn is None:
+                return ("✗ model-router plugin not active — /t1-/t5 unavailable\n"
+                        "  Enable it: add 'model-router' to plugins.enabled in config.yaml")
+
+            # Derive the session key and current model.
+            source = self._normalize_source_for_session_key(event.source)
+            session_key = self._session_key_for_source(source)
+
+            current_model = ""
+            override = self._session_model_overrides.get(session_key, {})
+            if override:
+                current_model = override.get("model", "")
+            if not current_model:
+                from gateway.run import _load_gateway_config, _resolve_gateway_model
+                cfg = _load_gateway_config()
+                current_model = _resolve_gateway_model(cfg)
+
+            _apply_fn(session_key, tier_num, current_model)
+
+            meta = _meta_fn(tier_num) if _meta_fn else {}
+            new_model = meta.get("model")
+            if not new_model:
+                return f"✗ Tier T{tier_num} is not configured correctly in model_router.yaml\n  Fix the active profile router config and try again."
+
+            reasoning = meta.get("reasoning")
+            tier_label = meta.get("label") or f"T{tier_num}"
+            if reasoning:
+                tier_label += f" (reasoning={reasoning})"
+
+            # Resolve provider/base_url so the next agent creation uses the
+            # tier's model.  The router stores model + provider in the tier
+            # meta; we bridge that into _session_model_overrides.
+            provider = meta.get("provider", "")
+            base_url = meta.get("base_url", "")
+            # Fetch the resolved provider info for the tier model so the
+            # gateway can build the agent runtime.  Fall back to the
+            # override/config provider when the tier meta doesn't carry one.
+            if not provider and override:
+                provider = override.get("provider", "")
+            if not base_url and override:
+                base_url = override.get("base_url", "")
+
+            # Store model note so the agent knows about the switch.
+            if not hasattr(self, "_pending_model_notes"):
+                self._pending_model_notes = {}
+            self._pending_model_notes[session_key] = (
+                f"[Note: model pinned to {tier_label} ({new_model}). "
+                f"Adjust your self-identification accordingly.]"
+            )
+            self._session_model_overrides[session_key] = {
+                "model": new_model,
+                "provider": provider,
+                "base_url": base_url,
+            }
+
+            return (
+                f"✓ Pinned to {tier_label} ({new_model})\n"
+                "  Auto-routing paused for this session. Use /auto to resume."
+            )
+
+        except Exception as exc:
+            return f"✗ Failed to switch tier: {exc}"
+
+    async def _handle_auto_command(self, event: MessageEvent) -> str:
+        """Handle /auto — resume auto model routing after a /model or /t1-/t5 pin."""
+        try:
+            from hermes_cli.plugins import get_plugin_manager as _get_pm
+            _mgr = _get_pm()
+            _unpin_fn = getattr(_mgr, "router_unpin_session", None)
+            _is_pinned_fn = getattr(_mgr, "router_is_pinned", None)
+            if _unpin_fn is None and hasattr(_mgr, "discover_and_load"):
+                _mgr.discover_and_load()
+                _unpin_fn = getattr(_mgr, "router_unpin_session", None)
+                _is_pinned_fn = getattr(_mgr, "router_is_pinned", None)
+
+            if _unpin_fn is None:
+                return ("✗ model-router plugin not active — /auto unavailable\n"
+                        "  Enable it: add 'model-router' to plugins.enabled in config.yaml")
+
+            source = self._normalize_source_for_session_key(event.source)
+            session_key = self._session_key_for_source(source)
+
+            was_pinned = _is_pinned_fn(session_key) if _is_pinned_fn else False
+            _unpin_fn(session_key)
+
+            # Clear any session-scoped model override set by /t1-/t5 or /model.
+            self._session_model_overrides.pop(session_key, None)
+            if hasattr(self, "_pending_model_notes"):
+                self._pending_model_notes.pop(session_key, None)
+
+            if was_pinned:
+                return ("✓ Auto model routing resumed\n"
+                        "  Next turn will be classified and routed automatically.")
+            else:
+                return "✓ Auto routing already active (no pin was set)"
+
+        except Exception as exc:
+            return f"✗ Failed to resume auto routing: {exc}"

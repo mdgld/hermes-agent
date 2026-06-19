@@ -2265,6 +2265,16 @@ DEFAULT_CONFIG = {
         # worker process (if still running host-locally) is terminated
         # before the reclaim.  0 disables stale detection entirely.
         "dispatch_stale_timeout_seconds": 14400,
+        # Default notification subscribers auto-added to every new task.
+        # Each entry is a dict with ``platform`` and ``chat_id`` (both
+        # required); ``thread_id``, ``user_id``, and ``notifier_profile``
+        # are optional.  Covered by ``create_task()`` so CLI, agent, *and*
+        # gateway task creation all get the same auto-subscribe behaviour.
+        # Example:
+        #   default_notification_subscribers:
+        #     - platform: telegram
+        #       chat_id: "123456"
+        "default_notification_subscribers": [],
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.
