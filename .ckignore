@@ -1,0 +1,120 @@
+# .ckignore - patterns for ck semantic search
+# Syntax: same as .gitignore (glob patterns, ! for negation)
+
+# --- Dependency / virtualenv / VCS dirs (the big ones) ---
+node_modules/
+venv/
+.venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.next/
+.turbo/
+coverage/
+
+# --- Lock files (huge, noise) ---
+*.lock
+*.lock.*
+
+# --- Secrets: never embed these ---
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# --- Built/dist artifacts ---
+web_dist/
+tui_dist/
+dist/
+build/
+website/
+web/
+*.min.js
+*.min.css
+
+# --- ck's own index (never index the index) ---
+.ck/
+
+# --- Large non-code dirs ---
+locales/
+.serena/
+.github/
+docs/
+
+# --- Nested node_modules (catch any nested ones) ---
+**/node_modules/
+
+# --- PDFs and other docs ---
+*.pdf
+*.docx
+*.doc
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.svg
+*.ico
+*.webp
+*.tiff
+
+# Video
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.webm
+
+# Audio
+*.mp3
+*.wav
+*.flac
+*.aac
+*.ogg
+*.m4a
+
+# Binary/Compiled
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.obj
+*.o
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.bz2
+*.gz
+
+# Data files
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+*.arrow
+
+# Config formats — keep most for search, only exclude lock/schema noise
+package-lock.json
+yarn.lock
+bun.lockb
+*.schema.json
+openapi.json
+openapi.yaml
