@@ -5574,8 +5574,210 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             f"Tokens: {total_tokens:,}",
             f"Agent Running: {'Yes' if is_running else 'No'}",
         ])
+        router_state = self._get_router_state()
+        if router_state:
+            tier = int(router_state.get("tier") or router_state.get("last_tier") or 0)
+            mode = "pinned" if router_state.get("pinned") else "auto"
+            router_line = f"Router: {mode}"
+            if tier:
+                router_line += f" · T{tier}"
+            if router_state.get("profile_id"):
+                router_line += f" · {router_state['profile_id']}"
+            if router_state.get("provider"):
+                router_line += f" · {router_state['provider']}"
+            if router_state.get("model"):
+                router_line += f" · {router_state['model']}"
+            lines.append(router_line)
+        self._console_print("\n".join(lines), highlight=False, markup=False)
+
+    def _get_router_manager(self):
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+
+            mgr = get_plugin_manager()
+            if getattr(mgr, "router_get_session_state", None) is None and hasattr(mgr, "discover_and_load"):
+                mgr.discover_and_load()
+            return mgr
+        except Exception:
+            return None
+
+    def _get_router_diagnostics(self) -> dict[str, Any]:
+        mgr = self._get_router_manager()
+        if mgr is None:
+            return {}
+        diag_fn = getattr(mgr, "router_get_diagnostics", None)
+        if callable(diag_fn):
+            result = diag_fn(self.session_id or "", limit=5)
+            return result if isinstance(result, dict) else {}
+        state_fn = getattr(mgr, "router_get_session_state", None)
+        if callable(state_fn):
+            state = state_fn(self.session_id or "") or {}
+            return {"state": state, "recent_events": []} if isinstance(state, dict) else {}
+        return {}
+
+    def _get_router_state(self) -> dict[str, Any]:
+        diagnostics = self._get_router_diagnostics()
+        state = diagnostics.get("state", {})
+        return state if isinstance(state, dict) else {}
+
+    def _show_router_status(self) -> None:
+        diagnostics = self._get_router_diagnostics()
+        state = diagnostics.get("state", {}) if isinstance(diagnostics, dict) else {}
+        recent_events = diagnostics.get("recent_events", []) if isinstance(diagnostics, dict) else []
+        if not state:
+            _cprint("  ✗ model-router plugin not active — /router-status unavailable")
+            _cprint("    Enable it: add 'model-router' to plugins.enabled in config.yaml")
+            return
+
+        tier = int(state.get("tier") or state.get("last_tier") or 0)
+        lines = [
+            "Hermes Router Status",
+            "",
+            f"Session ID: {self.session_id}",
+            f"Mode: {'pinned' if state.get('pinned') else 'auto'}",
+            f"Tier: T{tier}" if tier else "Tier: unknown",
+            f"Profile: {state.get('profile_id') or '(none)'}",
+            f"Provider: {state.get('provider') or '(unknown)'}",
+            f"Model: {state.get('model') or '(unknown)'}",
+            f"API Mode: {state.get('api_mode') or '(unknown)'}",
+        ]
+        if state.get("reasoning") is not None:
+            lines.append(f"Reasoning: {state.get('reasoning')}")
+        if state.get("updated_at"):
+            try:
+                updated_at = datetime.fromtimestamp(float(state["updated_at"]))
+                lines.append(f"Updated: {updated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception:
+                pass
+        route_reason = str(state.get("route_reason") or "")
+        if route_reason:
+            route_name = state.get("route_name")
+            route_keyword = state.get("route_keyword")
+            if route_reason == "task_route" and route_name:
+                route_line = f"Route: task_route ({route_name})"
+                if route_keyword:
+                    route_line += f" via '{route_keyword}'"
+            else:
+                route_line = f"Route: {route_reason}"
+            lines.append(route_line)
+        lines.append("")
+        lines.append("Recent Events:")
+        if recent_events:
+            for item in recent_events[-5:]:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("event") or "unknown")
+                event_tier = item.get("tier")
+                event_model = str(item.get("model") or "")
+                event_provider = str(item.get("provider") or "")
+                parts = [label]
+                if event_tier not in (None, "", 0, "0"):
+                    parts.append(f"T{event_tier}")
+                if event_provider:
+                    parts.append(event_provider)
+                if event_model:
+                    parts.append(event_model)
+                lines.append(f"- {' · '.join(parts)}")
+        else:
+            lines.append("- none")
+        sv = diagnostics.get("startup_validation", {}) if isinstance(diagnostics, dict) else {}
+        sv_errors = sv.get("errors", []) if isinstance(sv, dict) else []
+        sv_warnings = sv.get("warnings", []) if isinstance(sv, dict) else []
+        if sv_errors or sv_warnings:
+            lines.append("")
+            lines.append("Config Validation:")
+            for err in sv_errors:
+                lines.append(f"- ERROR: {err}")
+            for warn in sv_warnings:
+                lines.append(f"- WARN: {warn}")
         self._console_print("\n".join(lines), highlight=False, markup=False)
     
+    def _show_router_analytics(self) -> None:
+        mgr = self._get_router_manager()
+        analytics_fn = getattr(mgr, "router_get_analytics", None) if mgr is not None else None
+        if not callable(analytics_fn):
+            _cprint("  ✗ model-router plugin not active — /router-analytics unavailable")
+            return
+        data = analytics_fn(limit=200)
+        if not isinstance(data, dict):
+            _cprint("  ✗ router analytics unavailable")
+            return
+        lines = [
+            "Hermes Router Analytics",
+            "",
+            f"Events read: {data.get('total_events_read', 0)}",
+            "",
+            "Tier counts:",
+        ]
+        tier_counts = data.get("tier_counts", {})
+        if tier_counts:
+            for tier, count in sorted(tier_counts.items()):
+                lines.append(f"  T{tier}: {count}")
+        else:
+            lines.append("  (none)")
+        lines.append("")
+        lines.append("Route reason counts:")
+        reason_counts = data.get("reason_counts", {})
+        if reason_counts:
+            for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
+                lines.append(f"  {reason}: {count}")
+        else:
+            lines.append("  (none)")
+        lines.append("")
+        lines.append("Task route hits:")
+        task_hits = data.get("task_route_hits", {})
+        if task_hits:
+            for route, count in sorted(task_hits.items(), key=lambda x: -x[1]):
+                lines.append(f"  {route}: {count}")
+        else:
+            lines.append("  (none)")
+        lines.append("")
+        lines.append(f"Classifier fallbacks: {data.get('classifier_fallback_count', 0)}")
+        lines.append(f"Mismatches: {data.get('mismatch_count', 0)}")
+        self._console_print("\n".join(lines), highlight=False, markup=False)
+
+    def _show_router_config(self) -> None:
+        mgr = self._get_router_manager()
+        meta_fn = getattr(mgr, "router_get_tier_meta", None) if mgr is not None else None
+        startup_fn = getattr(mgr, "router_get_startup_status", None) if mgr is not None else None
+        if meta_fn is None:
+            _cprint("  ✗ model-router plugin not active — /router-config unavailable")
+            _cprint("    Enable it: add 'model-router' to plugins.enabled in config.yaml")
+            return
+        import os
+        from pathlib import Path as _Path
+        config_path = _Path(os.environ.get("HERMES_HOME", str(_Path.home() / ".hermes"))) / "model_router.yaml"
+        lines = ["Hermes Router Config", "", f"Config: {config_path}"]
+        if startup_fn:
+            sv = startup_fn() or {}
+            for err in sv.get("errors", []):
+                lines.append(f"⚠ Config error: {err}")
+            for warn in sv.get("warnings", []):
+                lines.append(f"  Warning: {warn}")
+        lines.extend(["", "Active tiers:"])
+        for tier_num in range(1, 6):
+            meta = meta_fn(tier_num)
+            if not meta:
+                continue
+            model = meta.get("model") or "(not set)"
+            provider = meta.get("provider") or ""
+            reasoning = meta.get("reasoning") or ""
+            label = meta.get("label") or f"T{tier_num}"
+            row = f"  {label}: {model}"
+            if provider:
+                row += f" · {provider}"
+            if reasoning:
+                row += f" · reasoning={reasoning}"
+            lines.append(row)
+        lines.extend([
+            "",
+            "To configure, say e.g.:",
+            "  'set T4 to openrouter/deepseek-v4-pro'",
+            "  'add nous as a T3 fallback'",
+            "  'show the full router YAML'",
+        ])
+        self._console_print("\n".join(lines), highlight=False, markup=False)
+
     def _fast_command_available(self) -> bool:
         try:
             from hermes_cli.models import model_supports_fast_mode
@@ -7004,6 +7206,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             except Exception as exc:
                 _cprint(f"  ⚠ Agent swap failed ({exc}); change applied to next session.")
 
+        # Immediately pin the router so auto-routing does not override the next turn.
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            _router_mgr = get_plugin_manager()
+            _pin_fn = getattr(_router_mgr, "router_pin_session", None)
+            if _pin_fn is None and hasattr(_router_mgr, "discover_and_load"):
+                _router_mgr.discover_and_load()
+                _pin_fn = getattr(_router_mgr, "router_pin_session", None)
+            if _pin_fn:
+                _pin_fn(self.session_id or "", result.new_model)
+        except Exception:
+            pass
+
         # Store a note to prepend to the next user message so the model
         # knows a switch occurred (avoids injecting system messages mid-history
         # which breaks providers and prompt caching).
@@ -7184,6 +7399,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         except Exception as exc:
             _cprint(f"  ✗ Failed to resume auto routing: {exc}")
+
 
 
     def _should_handle_model_command_inline(self, text: str, has_images: bool = False) -> bool:
@@ -7575,6 +7791,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._show_gateway_status()
         elif canonical == "status":
             self._show_session_status()
+        elif canonical == "router-status":
+            self._show_router_status()
+        elif canonical == "router-analytics":
+            self._show_router_analytics()
+        elif canonical == "router-config":
+            self._show_router_config()
         elif canonical == "statusbar":
             self._status_bar_visible = not self._status_bar_visible
             state = "visible" if self._status_bar_visible else "hidden"

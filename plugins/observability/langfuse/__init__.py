@@ -22,6 +22,7 @@ Optional env vars:
 """
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -623,10 +624,15 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
 
     if propagate_attributes is not None:
         try:
+            tags = ["hermes", "langfuse"]
+            if provider:
+                tags.append(f"provider:{provider}")
+            if model:
+                tags.append(f"model:{model}")
             with propagate_attributes(
                 session_id=session_id or task_key,
                 trace_name="Hermes turn",
-                tags=["hermes", "langfuse"],
+                tags=tags,
             ):
                 root_ctx = client.start_as_current_observation(
                     trace_context=trace_ctx,
@@ -931,6 +937,48 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     if state is None or generation is None:
         return
 
+    # Enrich root trace metadata with the actual serving provider/model
+    try:
+        existing_meta = getattr(state.root_span, "metadata", {}) or {}
+        if not isinstance(existing_meta, dict):
+            existing_meta = {}
+        
+        # Read from model-router state as fallback/additional verification
+        router_provider = ""
+        router_model = ""
+        try:
+            import json as _json
+            state_path = os.path.expanduser("~/.hermes/model-router/state.json")
+            if os.path.exists(state_path):
+                router_state = _json.load(open(state_path))
+                runtime = router_state.get("session_runtime_state", {}).get(session_id, {})
+                if runtime:
+                    router_provider = runtime.get("provider", "")
+                    router_model = runtime.get("model", "")
+        except Exception:
+            pass
+
+        actual_prov = provider or router_provider
+        actual_mod = model or router_model
+        intended_prov = existing_meta.get("provider")
+        intended_mod = existing_meta.get("model")
+
+        if actual_prov:
+            existing_meta["router_actual_provider"] = actual_prov
+            if intended_prov and actual_prov != intended_prov:
+                existing_meta["actual_provider"] = actual_prov
+                existing_meta["intended_provider"] = intended_prov
+                existing_meta["fallback_occurred"] = True
+        if actual_mod:
+            existing_meta["router_actual_model"] = actual_mod
+            if intended_mod and actual_mod != intended_mod:
+                existing_meta["actual_model"] = actual_mod
+                existing_meta["intended_model"] = intended_mod
+        
+        state.root_span.update(metadata=existing_meta)
+    except Exception as exc:
+        _debug(f"Failed to update root span metadata: {exc}")
+
     # Handle both call patterns:
     # 1. post_api_request: passes usage (dict), assistant_content_chars, assistant_tool_call_count
     # 2. post_llm_call: passes assistant_message (object), response (object), assistant_response (str)
@@ -1125,6 +1173,24 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
     )
 
 
+def _shutdown_langfuse() -> None:
+    """Flush and close the Langfuse client before interpreter shutdown."""
+    global _LANGFUSE_CLIENT
+    client = _LANGFUSE_CLIENT
+    if client is None or client is _INIT_FAILED:
+        return
+    try:
+        client.flush()
+    except Exception:
+        pass
+    close_fn = getattr(client, "close", None)
+    if callable(close_fn):
+        try:
+            close_fn()
+        except Exception:
+            pass
+
+
 def register(ctx) -> None:
     # Register for both hook name variants so the plugin works across
     # Hermes versions.  pre_api_request / post_api_request fire per API
@@ -1135,3 +1201,4 @@ def register(ctx) -> None:
     ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
+    atexit.register(_shutdown_langfuse)

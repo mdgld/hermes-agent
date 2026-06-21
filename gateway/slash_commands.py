@@ -48,6 +48,68 @@ logger = logging.getLogger("gateway.run")
 class GatewaySlashCommandsMixin:
     """In-session slash-command handlers for GatewayRunner."""
 
+    @staticmethod
+    def _get_router_manager():
+        try:
+            from hermes_cli.plugins import get_plugin_manager as _get_pm
+
+            mgr = _get_pm()
+            if getattr(mgr, "router_get_session_state", None) is None and hasattr(mgr, "discover_and_load"):
+                mgr.discover_and_load()
+            return mgr
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_router_event(event: dict[str, Any]) -> str:
+        if not isinstance(event, dict):
+            return "- unknown"
+        event_name = str(event.get("event") or "unknown")
+        model = str(event.get("model") or "")
+        provider = str(event.get("provider") or "")
+        tier = event.get("tier")
+        parts = [event_name]
+        if tier not in (None, "", 0, "0"):
+            parts.append(f"T{tier}")
+        if provider:
+            parts.append(provider)
+        if model:
+            parts.append(model)
+        return " · ".join(parts)
+
+    def _router_compact_summary(
+        self,
+        router_state: dict[str, Any],
+        override: dict[str, Any],
+    ) -> list[str]:
+        if not isinstance(router_state, dict) or not router_state:
+            return []
+
+        tier = int(router_state.get("tier") or router_state.get("last_tier") or 0)
+        mode = "pinned" if router_state.get("pinned") else "auto"
+        profile_id = str(router_state.get("profile_id") or "")
+        provider = str(router_state.get("provider") or "")
+        model = str(router_state.get("model") or "")
+        api_mode = str(router_state.get("api_mode") or "")
+
+        head = f"Router: {mode}"
+        if tier:
+            head += f" · T{tier}"
+        if profile_id:
+            head += f" · {profile_id}"
+        if provider:
+            head += f" · {provider}"
+        if model:
+            head += f" · {model}"
+        if api_mode:
+            head += f" · {api_mode}"
+
+        lines = [head]
+        override_model = str((override or {}).get("model") or "")
+        if override_model and model and override_model != model:
+            lines.append(f"Router Override Mismatch: gateway={override_model} router={model}")
+        return lines
+
     def _typed_command_prefix_for(self, platform) -> str:
         """Return the prefix users can always type to reach Hermes commands.
 
@@ -481,6 +543,14 @@ class GatewaySlashCommandsMixin:
                 context_used = _int_value(getattr(ctx, "last_prompt_tokens", 0))
                 context_total = _int_value(getattr(ctx, "context_length", 0))
 
+        override = getattr(self, "_session_model_overrides", {}).get(session_key, {}) or {}
+        if override.get("model"):
+            model_name = _clean_str(override.get("model"))
+        if override.get("provider"):
+            provider_name = _clean_str(override.get("provider"))
+        if "base_url" in override and override.get("base_url") is not None:
+            base_url = _clean_str(override.get("base_url"))
+
         model_name = model_name or _clean_str(session_row.get("model"))
         provider_name = provider_name or _clean_str(session_row.get("billing_provider"))
         base_url = base_url or _clean_str(session_row.get("billing_base_url"))
@@ -538,6 +608,20 @@ class GatewaySlashCommandsMixin:
             lines.append(model_line)
         if context_line:
             lines.append(context_line)
+        router_lines: list[str] = []
+        mgr = self._get_router_manager()
+        if mgr is not None:
+            diag_fn = getattr(mgr, "router_get_diagnostics", None)
+            state_fn = getattr(mgr, "router_get_session_state", None)
+            router_state = {}
+            if callable(diag_fn):
+                diag = diag_fn(session_entry.session_id, limit=3) or {}
+                router_state = diag.get("state", {}) if isinstance(diag, dict) else {}
+            elif callable(state_fn):
+                router_state = state_fn(session_entry.session_id) or {}
+            router_lines = self._router_compact_summary(router_state, override)
+        if router_lines:
+            lines.extend(router_lines)
         lines.extend([
             t("gateway.status.tokens", tokens=f"{db_total_tokens:,}"),
             t("gateway.status.agent_running", state=t("gateway.status.state_yes") if is_running else t("gateway.status.state_no")),
@@ -565,6 +649,188 @@ class GatewaySlashCommandsMixin:
             t("gateway.status.platforms", platforms=', '.join(connected_platforms)),
         ])
 
+        return "\n".join(lines)
+
+    async def _handle_router_status_command(self, event: MessageEvent) -> str:
+        """Handle /router-status command."""
+        source = event.source
+        session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+        override = getattr(self, "_session_model_overrides", {}).get(session_key, {}) or {}
+
+        mgr = self._get_router_manager()
+        diag_fn = getattr(mgr, "router_get_diagnostics", None) if mgr is not None else None
+        state_fn = getattr(mgr, "router_get_session_state", None) if mgr is not None else None
+        events_fn = getattr(mgr, "router_get_recent_events", None) if mgr is not None else None
+        if not callable(diag_fn) and not callable(state_fn):
+            return (
+                "✗ model-router plugin not active — /router-status unavailable\n"
+                "  Enable it: add 'model-router' to plugins.enabled in config.yaml"
+            )
+
+        diagnostics = diag_fn(session_entry.session_id, limit=5) if callable(diag_fn) else {}
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        router_state = diagnostics.get("state", {}) if diagnostics else {}
+        if not router_state and callable(state_fn):
+            router_state = state_fn(session_entry.session_id) or {}
+        recent_events = diagnostics.get("recent_events", []) if diagnostics else []
+        if not recent_events and callable(events_fn):
+            recent_events = events_fn(session_entry.session_id, limit=5) or []
+
+        tier = int(router_state.get("tier") or router_state.get("last_tier") or 0)
+        lines = [
+            "Hermes Router Status",
+            "",
+            f"Session ID: {session_entry.session_id}",
+            f"Mode: {'pinned' if router_state.get('pinned') else 'auto'}",
+            f"Tier: T{tier}" if tier else "Tier: unknown",
+            f"Profile: {router_state.get('profile_id') or '(none)'}",
+            f"Provider: {router_state.get('provider') or '(unknown)'}",
+            f"Model: {router_state.get('model') or '(unknown)'}",
+            f"API Mode: {router_state.get('api_mode') or '(unknown)'}",
+        ]
+        if router_state.get("reasoning") is not None:
+            lines.append(f"Reasoning: {router_state.get('reasoning')}")
+        if router_state.get("updated_at"):
+            try:
+                updated_at = datetime.fromtimestamp(float(router_state["updated_at"]))
+                lines.append(f"Updated: {updated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception:
+                pass
+        route_reason = str(router_state.get("route_reason") or "")
+        if route_reason:
+            route_name = router_state.get("route_name")
+            route_keyword = router_state.get("route_keyword")
+            if route_reason == "task_route" and route_name:
+                route_line = f"Route: task_route ({route_name})"
+                if route_keyword:
+                    route_line += f" via '{route_keyword}'"
+            else:
+                route_line = f"Route: {route_reason}"
+            lines.append(route_line)
+
+        lines.append("")
+        lines.append("Gateway Override:")
+        if override:
+            lines.append(f"- model: {override.get('model') or '(none)'}")
+            lines.append(f"- provider: {override.get('provider') or '(none)'}")
+            lines.append(f"- base_url: {override.get('base_url') or '(none)'}")
+            lines.append(f"- api_mode: {override.get('api_mode') or '(none)'}")
+            if override.get("runtime_profile"):
+                lines.append(f"- runtime_profile: {override.get('runtime_profile')}")
+        else:
+            lines.append("- none")
+
+        override_model = str(override.get("model") or "")
+        router_model = str(router_state.get("model") or "")
+        if override_model and router_model and override_model != router_model:
+            lines.extend([
+                "",
+                f"Mismatch: gateway override model is {override_model} but router state is {router_model}",
+            ])
+
+        lines.append("")
+        lines.append("Recent Events:")
+        if recent_events:
+            for item in recent_events[-5:]:
+                lines.append(f"- {self._format_router_event(item)}")
+        else:
+            lines.append("- none")
+
+        sv = diagnostics.get("startup_validation", {}) if isinstance(diagnostics, dict) else {}
+        sv_errors = sv.get("errors", []) if isinstance(sv, dict) else []
+        sv_warnings = sv.get("warnings", []) if isinstance(sv, dict) else []
+        if sv_errors or sv_warnings:
+            lines.append("")
+            lines.append("Config Validation:")
+            for err in sv_errors:
+                lines.append(f"- ERROR: {err}")
+            for warn in sv_warnings:
+                lines.append(f"- WARN: {warn}")
+
+        return "\n".join(lines)
+
+    async def _handle_router_analytics_command(self, event: MessageEvent) -> str:
+        """Handle /router-analytics command."""
+        mgr = self._get_router_manager()
+        analytics_fn = getattr(mgr, "router_get_analytics", None) if mgr is not None else None
+        if not callable(analytics_fn):
+            return (
+                "✗ model-router plugin not active — /router-analytics unavailable\n"
+                "  Enable it: add 'model-router' to plugins.enabled in config.yaml"
+            )
+        data = analytics_fn(limit=200)
+        if not isinstance(data, dict):
+            return "✗ router analytics unavailable"
+        lines = [
+            "Hermes Router Analytics",
+            "",
+            f"Events read: {data.get('total_events_read', 0)}",
+            "",
+            "Tier counts:",
+        ]
+        tier_counts = data.get("tier_counts", {})
+        if tier_counts:
+            for tier, count in sorted(tier_counts.items()):
+                lines.append(f"  T{tier}: {count}")
+        else:
+            lines.append("  (none)")
+        lines.append("")
+        lines.append("Route reason counts:")
+        reason_counts = data.get("reason_counts", {})
+        if reason_counts:
+            for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
+                lines.append(f"  {reason}: {count}")
+        else:
+            lines.append("  (none)")
+        lines.append("")
+        lines.append("Task route hits:")
+        task_hits = data.get("task_route_hits", {})
+        if task_hits:
+            for route, count in sorted(task_hits.items(), key=lambda x: -x[1]):
+                lines.append(f"  {route}: {count}")
+        else:
+            lines.append("  (none)")
+        lines.append("")
+        lines.append(f"Classifier fallbacks: {data.get('classifier_fallback_count', 0)}")
+        lines.append(f"Mismatches: {data.get('mismatch_count', 0)}")
+        return "\n".join(lines)
+
+    async def _handle_router_config_command(self, event: MessageEvent) -> str:
+        """Handle /router-config command."""
+        mgr = self._get_router_manager()
+        meta_fn = getattr(mgr, "router_get_tier_meta", None) if mgr is not None else None
+        startup_fn = getattr(mgr, "router_get_startup_status", None) if mgr is not None else None
+        if meta_fn is None:
+            return (
+                "✗ model-router plugin not active — /router-config unavailable\n"
+                "  Enable it: add 'model-router' to plugins.enabled in config.yaml"
+            )
+        import os
+        from pathlib import Path as _Path
+        config_path = _Path(os.environ.get("HERMES_HOME", str(_Path.home() / ".hermes"))) / "model_router.yaml"
+        lines = ["Hermes Router Config", "", f"Config: {config_path}"]
+        if startup_fn:
+            sv = startup_fn() or {}
+            for err in sv.get("errors", []):
+                lines.append(f"⚠ Config error: {err}")
+        lines.extend(["", "Active tiers:"])
+        for tier_num in range(1, 6):
+            meta = meta_fn(tier_num)
+            if not meta:
+                continue
+            model = meta.get("model") or "(not set)"
+            provider = meta.get("provider") or ""
+            reasoning = meta.get("reasoning") or ""
+            label = meta.get("label") or f"T{tier_num}"
+            row = f"  {label}: {model}"
+            if provider:
+                row += f" · {provider}"
+            if reasoning:
+                row += f" · reasoning={reasoning}"
+            lines.append(row)
+        lines.extend(["", "Say what you'd like to change and I'll update the config."])
         return "\n".join(lines)
 
     @staticmethod
@@ -1338,6 +1604,16 @@ class GatewaySlashCommandsMixin:
                     logger.debug(
                         "Failed to persist model switch to DB: %s", exc
                     )
+
+            try:
+                from hermes_cli.plugins import get_plugin_manager
+                _router_mgr = get_plugin_manager()
+                _pin_fn = getattr(_router_mgr, "router_pin_session", None)
+                if _pin_fn:
+                    _pin_entry = self.session_store.get_or_create_session(source)
+                    _pin_fn(_pin_entry.session_id, result.new_model)
+            except Exception:
+                pass
 
             # Store a note to prepend to the next user message so the model
             # knows about the switch (avoids system messages mid-history).
@@ -3847,18 +4123,21 @@ class GatewaySlashCommandsMixin:
             from hermes_cli.plugins import get_plugin_manager as _get_pm
             _mgr = _get_pm()
             _apply_fn = getattr(_mgr, "router_apply_tier", None)
+            _resolve_fn = getattr(_mgr, "router_resolve_tier_runtime", None)
             _meta_fn = getattr(_mgr, "router_get_tier_meta", None)
             if _apply_fn is None and hasattr(_mgr, "discover_and_load"):
                 _mgr.discover_and_load()
                 _apply_fn = getattr(_mgr, "router_apply_tier", None)
+                _resolve_fn = getattr(_mgr, "router_resolve_tier_runtime", None)
                 _meta_fn = getattr(_mgr, "router_get_tier_meta", None)
             if _apply_fn is None:
                 return ("✗ model-router plugin not active — /t1-/t5 unavailable\n"
                         "  Enable it: add 'model-router' to plugins.enabled in config.yaml")
 
-            # Derive the session key and current model.
             source = self._normalize_source_for_session_key(event.source)
+            session_entry = self.session_store.get_or_create_session(source)
             session_key = self._session_key_for_source(source)
+            router_session_id = session_entry.session_id
 
             current_model = ""
             override = self._session_model_overrides.get(session_key, {})
@@ -3869,32 +4148,36 @@ class GatewaySlashCommandsMixin:
                 cfg = _load_gateway_config()
                 current_model = _resolve_gateway_model(cfg)
 
-            _apply_fn(session_key, tier_num, current_model)
+            applied_runtime = _apply_fn(router_session_id, tier_num, current_model) or {}
+            runtime = _resolve_fn(tier_num) if callable(_resolve_fn) else {}
+            if not isinstance(runtime, dict):
+                runtime = {}
+            if applied_runtime:
+                runtime = {**runtime, **applied_runtime}
 
             meta = _meta_fn(tier_num) if _meta_fn else {}
-            new_model = meta.get("model")
+            new_model = runtime.get("model") or meta.get("model")
             if not new_model:
                 return f"✗ Tier T{tier_num} is not configured correctly in model_router.yaml\n  Fix the active profile router config and try again."
 
-            reasoning = meta.get("reasoning")
-            tier_label = meta.get("label") or f"T{tier_num}"
+            reasoning = runtime.get("reasoning", meta.get("reasoning"))
+            tier_label = runtime.get("display_name") or meta.get("label") or f"T{tier_num}"
             if reasoning:
                 tier_label += f" (reasoning={reasoning})"
 
-            # Resolve provider/base_url so the next agent creation uses the
-            # tier's model.  The router stores model + provider in the tier
-            # meta; we bridge that into _session_model_overrides.
-            provider = meta.get("provider", "")
-            base_url = meta.get("base_url", "")
-            # Fetch the resolved provider info for the tier model so the
-            # gateway can build the agent runtime.  Fall back to the
-            # override/config provider when the tier meta doesn't carry one.
+            provider = runtime.get("provider") or meta.get("provider", "")
+            base_url = runtime.get("base_url") or meta.get("base_url", "")
+            api_mode = runtime.get("api_mode") or meta.get("api_mode", "")
+            api_key = runtime.get("api_key") or ""
             if not provider and override:
                 provider = override.get("provider", "")
             if not base_url and override:
                 base_url = override.get("base_url", "")
+            if not api_mode and override:
+                api_mode = override.get("api_mode", "")
+            if not api_key and override:
+                api_key = override.get("api_key", "")
 
-            # Store model note so the agent knows about the switch.
             if not hasattr(self, "_pending_model_notes"):
                 self._pending_model_notes = {}
             self._pending_model_notes[session_key] = (
@@ -3904,8 +4187,27 @@ class GatewaySlashCommandsMixin:
             self._session_model_overrides[session_key] = {
                 "model": new_model,
                 "provider": provider,
+                "api_key": api_key,
                 "base_url": base_url,
+                "api_mode": api_mode,
+                "runtime_profile": runtime.get("profile_id", ""),
             }
+            if reasoning is None:
+                self._set_session_reasoning_override(session_key, None)
+            elif reasoning == "none":
+                self._set_session_reasoning_override(session_key, {"enabled": False})
+            else:
+                self._set_session_reasoning_override(
+                    session_key,
+                    {"enabled": True, "effort": reasoning},
+                )
+            _sess_db = getattr(self, "_session_db", None)
+            if _sess_db is not None:
+                try:
+                    _sess_db.update_session_model(session_entry.session_id, new_model)
+                except Exception as exc:
+                    logger.debug("Failed to persist tier switch to DB: %s", exc)
+            self._evict_cached_agent(session_key)
 
             return (
                 f"✓ Pinned to {tier_label} ({new_model})\n"
@@ -3932,15 +4234,19 @@ class GatewaySlashCommandsMixin:
                         "  Enable it: add 'model-router' to plugins.enabled in config.yaml")
 
             source = self._normalize_source_for_session_key(event.source)
+            session_entry = self.session_store.get_or_create_session(source)
             session_key = self._session_key_for_source(source)
+            router_session_id = session_entry.session_id
 
-            was_pinned = _is_pinned_fn(session_key) if _is_pinned_fn else False
-            _unpin_fn(session_key)
+            was_pinned = _is_pinned_fn(router_session_id) if _is_pinned_fn else False
+            _unpin_fn(router_session_id)
 
             # Clear any session-scoped model override set by /t1-/t5 or /model.
             self._session_model_overrides.pop(session_key, None)
+            self._set_session_reasoning_override(session_key, None)
             if hasattr(self, "_pending_model_notes"):
                 self._pending_model_notes.pop(session_key, None)
+            self._evict_cached_agent(session_key)
 
             if was_pinned:
                 return ("✓ Auto model routing resumed\n"

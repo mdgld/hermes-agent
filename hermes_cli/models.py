@@ -4001,7 +4001,27 @@ def validate_requested_model(
             region = resolve_bedrock_region()
             discovered = discover_bedrock_models(region)
             discovered_ids = {m["id"] for m in discovered}
-            if requested in discovered_ids:
+            if requested not in discovered_ids:
+                # Bedrock discovery is cached in-process for performance.
+                # Refresh once on a miss so newly discoverable inference profiles
+                # don't produce a stale warning.
+                try:
+                    from agent.bedrock_adapter import reset_discovery_cache
+
+                    reset_discovery_cache()
+                    discovered = discover_bedrock_models(region)
+                    discovered_ids = {m["id"] for m in discovered}
+                except Exception:
+                    pass
+            # Cross-region inference profile IDs (e.g. us.anthropic.X) are not
+            # returned by ListFoundationModels — only base IDs (anthropic.X) appear
+            # there. Strip the geographic prefix so prefixed IDs match correctly.
+            _base_requested = requested
+            for _xpfx in ("us.", "eu.", "ap."):
+                if requested.lower().startswith(_xpfx):
+                    _base_requested = requested[len(_xpfx):]
+                    break
+            if requested in discovered_ids or _base_requested in discovered_ids:
                 return {
                     "accepted": True,
                     "persist": True,

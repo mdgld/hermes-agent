@@ -234,6 +234,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
     # Exit
     CommandDef("quit", "Exit the CLI (use --delete to also remove session history)", "Exit",
                cli_only=True, aliases=("exit",), args_hint="[--delete]"),
+    CommandDef("router-status", "Show model-router state, resolved runtime, and recent routing events for this session", "Configuration"),
+    CommandDef("router-analytics", "Show aggregated model-router tier, reason, and task-route counts from the event log", "Configuration"),
+    CommandDef("router-config", "Show active tier/provider config and editing hints for the model router", "Configuration"),
 
     #Model Router
     CommandDef("t1", "Pin session to the configured T1 slot — disables auto-routing until /auto", "Configuration"),
@@ -1258,7 +1261,7 @@ class SlashCommandCompleter(Completer):
     # These should NOT receive a trailing space in completions because:
     # - The TUI's submit handler applies completions on Enter if input differs
     # - Adding space makes "/model" → "/model " which blocks picker execution
-    _PICKER_COMMANDS = frozenset({"model", "skin", "personality"})
+    _PICKER_COMMANDS = frozenset({"model"})
 
     @staticmethod
     def _completion_text(cmd_name: str, word: str) -> str:

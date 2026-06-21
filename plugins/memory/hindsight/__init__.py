@@ -222,6 +222,9 @@ def _get_loop() -> asyncio.AbstractEventLoop:
 
 def _run_sync(coro, timeout: float = _DEFAULT_TIMEOUT):
     """Schedule *coro* on the shared loop and block until done."""
+    import sys
+    if sys.is_finalizing():
+        raise RuntimeError("cannot schedule new futures after interpreter shutdown")
     from agent.async_utils import safe_schedule_threadsafe
     loop = _get_loop()
     future = safe_schedule_threadsafe(coro, loop)
@@ -1048,20 +1051,26 @@ class HindsightMemoryProvider(MemoryProvider):
         Each job() is wrapped so a single failure can't kill the writer.
         task_done() always fires so queue.join() works in tests.
         """
+        import sys
         while True:
             try:
                 job = self._retain_queue.get(timeout=1.0)
             except queue.Empty:
-                if self._shutting_down.is_set():
+                if self._shutting_down.is_set() or sys.is_finalizing():
                     return
                 continue
             try:
                 if job is _WRITER_SENTINEL:
                     return
+                if sys.is_finalizing():
+                    return
                 try:
                     job()
                 except Exception as exc:
-                    logger.warning("Hindsight retain failed: %s", exc, exc_info=True)
+                    if sys.is_finalizing() or "interpreter shutdown" in str(exc).lower():
+                        logger.debug("Hindsight retain dropped due to interpreter shutdown: %s", exc)
+                    else:
+                        logger.warning("Hindsight retain failed: %s", exc, exc_info=True)
             finally:
                 self._retain_queue.task_done()
 
