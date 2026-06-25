@@ -1753,9 +1753,9 @@ def resolve_runtime_provider(
         # Dual-path routing: Claude models use AnthropicBedrock SDK for full
         # feature parity (prompt caching, thinking budgets, adaptive thinking).
         # Non-Claude models use the Converse API for multi-model support.
-        _current_model = str(model_cfg.get("default") or "").strip()
-        if is_anthropic_bedrock_model(_current_model) and not bedrock_bearer_token:
-            # Claude on Bedrock with AWS SigV4 creds → AnthropicBedrock SDK → anthropic_messages path
+        _current_model = str(target_model or model_cfg.get("default") or "").strip()
+        if is_anthropic_bedrock_model(_current_model):
+            # Claude on Bedrock → AnthropicBedrock SDK → anthropic_messages path
             runtime = {
                 "provider": "bedrock",
                 "api_mode": "anthropic_messages",
