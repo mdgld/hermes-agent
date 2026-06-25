@@ -1137,40 +1137,6 @@ class _AnthropicCompletionsAdapter:
 
 
 
-class _BedrockCompletionsAdapter:
-    """OpenAI-client-compatible wrapper over Bedrock Converse."""
-
-    def __init__(self, model: str, region: str):
-        self._model = model
-        self._region = region
-
-    def create(self, **kwargs) -> Any:
-        from agent.bedrock_adapter import call_converse
-
-        # Bedrock classifier calls intentionally omit reasoning/thinking fields
-        # until regular Bedrock Converse support is confirmed for these models.
-        return call_converse(
-            region=self._region,
-            model=kwargs.get("model") or self._model,
-            messages=kwargs.get("messages") or [],
-            tools=kwargs.get("tools"),
-            max_tokens=kwargs.get("max_tokens") or kwargs.get("max_completion_tokens") or 2000,
-            temperature=kwargs.get("temperature"),
-            reasoning_config=None,
-        )
-
-
-class _BedrockChatShim:
-    def __init__(self, adapter: _BedrockCompletionsAdapter):
-        self.completions = adapter
-
-
-class BedrockAuxiliaryClient:
-    def __init__(self, model: str, region: str):
-        self.chat = _BedrockChatShim(_BedrockCompletionsAdapter(model, region))
-        self.api_key = "aws-bearer-token-bedrock"
-        self.base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
-
 class _AnthropicChatShim:
     def __init__(self, adapter: _AnthropicCompletionsAdapter):
         self.completions = adapter
@@ -4214,21 +4180,16 @@ def resolve_provider_client(
         region = resolve_bedrock_region()
         default_model = "anthropic.claude-haiku-4-5-20251001-v1:0"
         final_model = _normalize_resolved_model(model or default_model, provider)
-        from agent.bedrock_adapter import ensure_bedrock_bearer_token_env
-        ensure_bedrock_bearer_token_env()
-        if os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
-            client = BedrockAuxiliaryClient(final_model, region)
-        else:
-            try:
-                real_client = build_anthropic_bedrock_client(region)
-            except ImportError as exc:
-                logger.warning("resolve_provider_client: cannot create Bedrock "
-                               "client: %s", exc)
-                return None, None
-            client = AnthropicAuxiliaryClient(
-                real_client, final_model, api_key="aws-sdk",
-                base_url=f"https://bedrock-runtime.{region}.amazonaws.com",
-            )
+        try:
+            real_client = build_anthropic_bedrock_client(region)
+        except ImportError as exc:
+            logger.warning("resolve_provider_client: cannot create Bedrock "
+                           "client: %s", exc)
+            return None, None
+        client = AnthropicAuxiliaryClient(
+            real_client, final_model, api_key="aws-sdk",
+            base_url=f"https://bedrock-runtime.{region}.amazonaws.com",
+        )
         logger.debug("resolve_provider_client: bedrock (%s, %s)", final_model, region)
         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                 else (client, final_model))

@@ -58,35 +58,6 @@ _bedrock_runtime_client_cache: Dict[str, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
 
 
-def ensure_bedrock_bearer_token_env() -> None:
-    """Load AWS_BEARER_TOKEN_BEDROCK from ~/.hermes/.env when not exported.
-
-    Botocore supports Bedrock API-key auth through the AWS_BEARER_TOKEN_BEDROCK
-    environment variable. Hermes users commonly save keys in ~/.hermes/.env,
-    but boto3 only reads os.environ, so bridge that file-backed key into the
-    process before constructing Bedrock clients.
-    """
-    if os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
-        return
-    try:
-        from hermes_constants import get_hermes_home
-        env_path = get_hermes_home() / ".env"
-        if not env_path.exists():
-            return
-        for raw_line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip() != "AWS_BEARER_TOKEN_BEDROCK":
-                continue
-            value = value.strip().strip('"').strip("'")
-            if value:
-                os.environ["AWS_BEARER_TOKEN_BEDROCK"] = value
-            return
-    except Exception:
-        logger.debug("Unable to load AWS_BEARER_TOKEN_BEDROCK from .env", exc_info=True)
-
 
 
 _MIN_BOTO3_VERSION = (1, 34, 59)
@@ -125,7 +96,6 @@ def _get_bedrock_runtime_client(region: str):
     Uses the default AWS credential chain (env vars → profile → instance role).
     """
     if region not in _bedrock_runtime_client_cache:
-        ensure_bedrock_bearer_token_env()
         boto3 = _require_boto3()
         _bedrock_runtime_client_cache[region] = boto3.client(
             "bedrock-runtime", region_name=region,
@@ -136,7 +106,6 @@ def _get_bedrock_runtime_client(region: str):
 def _get_bedrock_control_client(region: str):
     """Get or create a cached ``bedrock`` control-plane client for model discovery."""
     if region not in _bedrock_control_client_cache:
-        ensure_bedrock_bearer_token_env()
         boto3 = _require_boto3()
         _bedrock_control_client_cache[region] = boto3.client(
             "bedrock", region_name=region,
@@ -1016,26 +985,6 @@ def build_converse_kwargs(
 
     if guardrail_config:
         kwargs["guardrailConfig"] = guardrail_config
-
-    # Adaptive thinking via additionalModelRequestFields.
-    # Claude 4.x on Bedrock uses thinking.type="adaptive" + output_config.effort.
-    # Opus 4.7/4.8: only "adaptive" supported; "enabled"/budget_tokens → 400.
-    # Sonnet 4.6: "adaptive" recommended; "enabled"+budget_tokens deprecated.
-    # effort lives in output_config (NOT inside the thinking object).
-    if reasoning_config and is_anthropic_bedrock_model(model):
-        thinking_type = reasoning_config.get("type", "adaptive")
-        amrf = kwargs.setdefault("additionalModelRequestFields", {})
-        amrf["thinking"] = {"type": thinking_type}
-        if thinking_type == "enabled":
-            budget = reasoning_config.get("budget_tokens")
-            if budget:
-                amrf["thinking"]["budget_tokens"] = budget
-        effort = reasoning_config.get("effort")
-        if effort:
-            # Normalize router-internal levels to Bedrock's accepted vocabulary.
-            # xhigh is router shorthand for "stronger than high" → max on Bedrock.
-            _EFFORT_MAP = {"xhigh": "max"}
-            amrf.setdefault("output_config", {})["effort"] = _EFFORT_MAP.get(effort, effort)
 
     return kwargs
 

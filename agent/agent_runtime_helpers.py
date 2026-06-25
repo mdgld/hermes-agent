@@ -1566,27 +1566,6 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             agent._is_anthropic_oauth = _is_oauth_token(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
             agent.client = None
             agent._client_kwargs = {}
-        elif api_mode == "bedrock_converse":
-            # Bedrock uses boto3/botocore directly via BedrockTransport; there is
-            # no OpenAI SDK client to rebuild. Keep the runtime internally
-            # consistent so dispatch uses bedrock-runtime instead of the prior
-            # provider's OpenAI-compatible client.
-            agent.client = None
-            agent._client_kwargs = {}
-            try:
-                from hermes_cli.config import load_config as _load_bedrock_cfg
-                _br_cfg = _load_bedrock_cfg().get("bedrock", {})
-                agent._bedrock_region = _br_cfg.get("region") or "us-east-1"
-                _gr = _br_cfg.get("guardrail", {}) or {}
-                agent._bedrock_guardrail_config = None
-                if _gr.get("guardrail_identifier") and _gr.get("guardrail_version"):
-                    agent._bedrock_guardrail_config = {
-                        "guardrailIdentifier": _gr["guardrail_identifier"],
-                        "guardrailVersion": _gr["guardrail_version"],
-                    }
-            except Exception:
-                agent._bedrock_region = "us-east-1"
-                agent._bedrock_guardrail_config = None
         else:
             effective_key = api_key or current_api_key
             effective_base = base_url or agent.base_url
