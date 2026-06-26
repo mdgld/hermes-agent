@@ -770,8 +770,8 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
         except Exception:
             try:
                 state.root_span.end()
-            except Exception:
-                pass
+            except Exception as exc:  # pragma: no cover - fail-open
+                _debug(f"finish trace teardown failed: {exc}")
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
     finally:
