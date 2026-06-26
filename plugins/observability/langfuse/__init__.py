@@ -735,9 +735,12 @@ def _evict_stale_locked() -> None:
     for key, state in stale:
         _TRACE_STATE.pop(key, None)
         try:
-            state.root_span.end()
-        except Exception as exc:  # pragma: no cover - fail-open
-            _debug(f"evict stale trace failed: {exc}")
+            state.root_ctx.__exit__(None, None, None)
+        except Exception:
+            try:
+                state.root_span.end()
+            except Exception as exc:  # pragma: no cover - fail-open
+                _debug(f"evict stale trace failed: {exc}")
 
 
 def _finish_trace(task_key: str, *, output: Any = None) -> None:
@@ -762,7 +765,13 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
         if final_output is not None:
             state.root_span.set_trace_io(output=final_output)
             state.root_span.update(output=final_output)
-        state.root_span.end()
+        try:
+            state.root_ctx.__exit__(None, None, None)
+        except Exception:
+            try:
+                state.root_span.end()
+            except Exception:
+                pass
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
     finally:

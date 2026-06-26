@@ -1021,3 +1021,84 @@ class TestUsageFromSanitizedResponse:
 
         assert seen["resp"] is resp
         assert captured["usage_details"] == {"input": 7, "output": 3}
+
+
+class TestRootContextExit:
+    """OpenTelemetry context managers are a token stack: ``root_ctx.__enter__``
+    pushes a context token and ``root_ctx.__exit__`` pops it.  The plugin opens
+    the root via ``root_ctx.__enter__()`` but historically tore it down with a
+    bare ``state.root_span.end()`` — leaving the OTel context token orphaned and
+    raising ``ValueError: Token was created in a different Context`` on process
+    exit.  Finalization and eviction must instead call
+    ``root_ctx.__exit__(None, None, None)`` so the token is popped from the same
+    context it was pushed into; ``__exit__`` ends the span itself.
+    """
+
+    def _make_mod(self):
+        sys.modules.pop("plugins.observability.langfuse", None)
+        return importlib.import_module("plugins.observability.langfuse")
+
+    def test_finish_trace_exits_context_cleanly(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        mod = self._make_mod()
+
+        flushed = {"n": 0}
+
+        class _Client:
+            def flush(self):
+                flushed["n"] += 1
+
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: _Client())
+
+        root_ctx = MagicMock(name="root_ctx")
+        root_span = MagicMock(name="root_span")
+        state = mod.TraceState(trace_id="trace-1", root_ctx=root_ctx, root_span=root_span)
+
+        task_key = mod._trace_key("task-1", "session-1")
+        monkeypatch.setitem(mod._TRACE_STATE, task_key, state)
+
+        mod._finish_trace(task_key)
+
+        # The OTel token must be popped via __exit__ on the same context
+        # manager that pushed it.
+        root_ctx.__exit__.assert_called_once_with(None, None, None)
+        # And the span must NOT be ended directly — __exit__ owns that.
+        root_span.end.assert_not_called()
+        # Finalization still flushes and pops the state.
+        assert flushed["n"] == 1
+        assert task_key not in mod._TRACE_STATE
+
+    def test_evict_stale_exits_context_cleanly(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        mod = self._make_mod()
+        mod._TRACE_STATE.clear()
+        monkeypatch.setattr(mod, "_MAX_TRACE_STATE", 2)
+
+        contexts = []
+        # Insert 2 entries so the dict is at the cap; the oldest is evicted
+        # when _evict_stale_locked makes room for one more.
+        for i in range(2):
+            root_ctx = MagicMock(name=f"root_ctx-{i}")
+            root_span = MagicMock(name=f"root_span-{i}")
+            state = mod.TraceState(trace_id=f"trace-{i}", root_ctx=root_ctx, root_span=root_span)
+            state.last_updated_at = float(i)  # entry 0 is the oldest
+            mod._TRACE_STATE[f"key-{i}"] = state
+            contexts.append((root_ctx, root_span))
+
+        with mod._STATE_LOCK:
+            mod._evict_stale_locked()
+
+        evicted_ctx, evicted_span = contexts[0]
+        survivor_ctx, survivor_span = contexts[1]
+
+        # The evicted (oldest) entry is torn down via __exit__, not span.end().
+        evicted_ctx.__exit__.assert_called_once_with(None, None, None)
+        evicted_span.end.assert_not_called()
+        assert "key-0" not in mod._TRACE_STATE
+
+        # The survivor is untouched.
+        survivor_ctx.__exit__.assert_not_called()
+        survivor_span.end.assert_not_called()
+        assert "key-1" in mod._TRACE_STATE
