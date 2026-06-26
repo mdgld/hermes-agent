@@ -973,9 +973,8 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
         intended_mod = existing_meta.get("model")
 
         if actual_prov:
-            existing_meta["router_actual_provider"] = actual_prov
+            existing_meta["actual_provider"] = actual_prov  # always record serving provider
             if intended_prov and actual_prov != intended_prov:
-                existing_meta["actual_provider"] = actual_prov
                 existing_meta["intended_provider"] = intended_prov
                 existing_meta["fallback_occurred"] = True
         if actual_mod:

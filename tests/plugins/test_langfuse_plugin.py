@@ -1102,3 +1102,75 @@ class TestRootContextExit:
         survivor_ctx.__exit__.assert_not_called()
         survivor_span.end.assert_not_called()
         assert "key-1" in mod._TRACE_STATE
+
+
+class TestActualProviderMetadata:
+    """actual_provider must always be recorded in root_span metadata, not only
+    when a provider fallback occurs.
+
+    Regression: previously ``actual_provider`` was only written when
+    ``actual_prov != intended_prov`` (fallback case).  Non-fallback calls were
+    invisible to any Langfuse query filtering on ``actual_provider``.
+    """
+
+    def _setup(self, mod, monkeypatch, *, intended_provider, actual_provider):
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
+        monkeypatch.setattr(mod, "_end_observation", lambda *a, **kw: None)
+        monkeypatch.setattr(mod, "_finish_trace", lambda *a, **kw: None)
+
+        root_span = MagicMock(name="root_span")
+        # Simulate metadata already written by on_pre_llm_request.
+        root_span.metadata = {"provider": intended_provider}
+
+        state = mod.TraceState(trace_id="trace-1", root_ctx=None, root_span=root_span)
+        state.generations[mod._request_key(1)] = object()
+        monkeypatch.setitem(mod._TRACE_STATE, mod._trace_key("task-1", "session-1"), state)
+
+        mod.on_post_llm_call(
+            task_id="task-1",
+            session_id="session-1",
+            api_call_count=1,
+            provider=actual_provider,
+            model="some-model",
+            assistant_content_chars=10,
+            usage={"input_tokens": 5, "output_tokens": 3},
+        )
+
+        return root_span
+
+    def test_actual_provider_set_when_no_fallback(self, monkeypatch):
+        """When serving provider matches intended, actual_provider is still recorded."""
+        sys.modules.pop("plugins.observability.langfuse", None)
+        mod = importlib.import_module("plugins.observability.langfuse")
+
+        root_span = self._setup(
+            mod, monkeypatch,
+            intended_provider="openrouter",
+            actual_provider="openrouter",
+        )
+
+        root_span.update.assert_called_once()
+        metadata = root_span.update.call_args.kwargs["metadata"]
+        assert metadata.get("actual_provider") == "openrouter"
+        assert "intended_provider" not in metadata
+        assert "fallback_occurred" not in metadata
+
+    def test_actual_provider_set_on_fallback(self, monkeypatch):
+        """When serving provider differs, actual_provider, intended_provider,
+        and fallback_occurred are all recorded."""
+        sys.modules.pop("plugins.observability.langfuse", None)
+        mod = importlib.import_module("plugins.observability.langfuse")
+
+        root_span = self._setup(
+            mod, monkeypatch,
+            intended_provider="nous",
+            actual_provider="openrouter",
+        )
+
+        root_span.update.assert_called_once()
+        metadata = root_span.update.call_args.kwargs["metadata"]
+        assert metadata.get("actual_provider") == "openrouter"
+        assert metadata.get("intended_provider") == "nous"
+        assert metadata.get("fallback_occurred") is True
