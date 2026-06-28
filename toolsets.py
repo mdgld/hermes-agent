@@ -246,8 +246,17 @@ TOOLSETS = {
         "includes": []
     },
 
-    # "honcho" toolset removed — Honcho is now a memory provider plugin.
-    # Tools are injected via MemoryManager, not the toolset system.
+    "honcho": {
+        "description": "Honcho user modeling database for stable user preferences/persona details",
+        "tools": ["honcho_profile", "honcho_search", "honcho_context", "honcho_conclude"],
+        "includes": []
+    },
+
+    "chronos": {
+        "description": "Chronos dual-index temporal retrieval memory database (sqlite Event + Turn Calendar)",
+        "tools": ["chronos_query", "chronos_list_events"],
+        "includes": []
+    },
 
     "homeassistant": {
         "description": "Home Assistant smart home control and monitoring",
