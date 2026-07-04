@@ -1411,6 +1411,54 @@ def test_config_sync_skips_session_pinned_by_model_command(monkeypatch):
     server._sync_agent_model_with_config("sid", session)
 
 
+def test_config_set_model_pins_model_router_session(monkeypatch):
+    sid = "desktop-session"
+    pins = []
+
+    class FakeRouterManager:
+        def router_pin_session(self, session_id, model):
+            pins.append((session_id, model))
+
+    server._sessions[sid] = {
+        "agent": types.SimpleNamespace(session_id="agent-session"),
+        "session_key": "desktop-key",
+    }
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda *_args, **_kwargs: {
+            "value": "manual/model",
+            "warning": "",
+            "confirm_required": False,
+            "confirm_message": "",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugins.get_plugin_manager",
+        lambda: FakeRouterManager(),
+    )
+
+    try:
+        response = server._methods["config.set"](
+            "rid",
+            {
+                "session_id": sid,
+                "key": "model",
+                "value": "manual/model --provider nous",
+                "confirm_expensive_model": True,
+            },
+        )
+    finally:
+        server._sessions.pop(sid, None)
+
+    assert response["result"]["value"] == "manual/model"
+    assert pins == [
+        (sid, "manual/model"),
+        ("desktop-key", "manual/model"),
+        ("agent-session", "manual/model"),
+    ]
+
+
 def test_config_sync_noop_when_config_unchanged(monkeypatch):
     _patch_config_model(monkeypatch, "old/model")
     session = _sync_test_session(config_model_seen=("old/model", ""))

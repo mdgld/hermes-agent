@@ -2591,6 +2591,63 @@ def _persist_model_switch(result) -> None:
         save_config_value("model.base_url", None)
 
 
+def _get_model_router_manager():
+    """Return the loaded model-router manager API, if the plugin is available."""
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        mgr = get_plugin_manager()
+        if getattr(mgr, "router_pin_session", None) is None and hasattr(
+            mgr, "discover_and_load"
+        ):
+            mgr.discover_and_load()
+        return mgr
+    except Exception:
+        return None
+
+
+def _router_session_ids_for_tui_session(sid: str, session: dict | None) -> list[str]:
+    """Router keys can be the UI sid, stored session key, or live agent session id."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def add(value) -> None:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            ordered.append(text)
+
+    add(sid)
+    if isinstance(session, dict):
+        add(session.get("session_key"))
+        agent = session.get("agent")
+        add(getattr(agent, "session_id", ""))
+    return ordered
+
+
+def _pin_model_router_for_tui_session(
+    sid: str, session: dict | None, model: str
+) -> None:
+    """Make desktop/TUI manual model picks override model-router auto-routing."""
+    model = str(model or "").strip()
+    if not model or not isinstance(session, dict):
+        return
+    mgr = _get_model_router_manager()
+    pin_fn = getattr(mgr, "router_pin_session", None) if mgr is not None else None
+    if not callable(pin_fn):
+        return
+    for router_sid in _router_session_ids_for_tui_session(sid, session):
+        try:
+            pin_fn(router_sid, model)
+        except Exception:
+            logger.debug(
+                "failed to pin model-router session %s to %s",
+                router_sid,
+                model,
+                exc_info=True,
+            )
+
+
 def _apply_model_switch(
     sid: str,
     session: dict,
@@ -9815,6 +9872,12 @@ def _(rid, params: dict) -> dict:
                     ),
                     parsed_flags=parsed_flags,
                 )
+                if not result.get("confirm_required"):
+                    _pin_model_router_for_tui_session(
+                        params.get("session_id", ""),
+                        session,
+                        result.get("value", ""),
+                    )
             else:
                 result = _apply_model_switch(
                     "",
