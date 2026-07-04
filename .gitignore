@@ -104,6 +104,19 @@ models-dev-upstream/
 .mcp.json
 opencode.json
 config/mcporter.json
+.claude.local.md
+.install_method
+.kilo/
+.kilocodeignore
+.omc/
+web/.omc/
+COMMIT_PLAN.md
+
+# Local backup/deploy scratch — never intentional commits, but left on disk
+# for the user's own reference rather than deleted.
+hermes_cli/backups/
+*.bak
+*.bak.*
 
 hermes_cli/tui_dist/*
 hermes_cli/scripts/
