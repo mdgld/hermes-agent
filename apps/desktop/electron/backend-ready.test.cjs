@@ -29,11 +29,13 @@ const {
 } = require('./backend-ready.cjs')
 
 // A minimal stand-in for a spawned child process: an EventEmitter with a
-// stdout EventEmitter, matching the surface waitForDashboardPort consumes
-// (child.stdout.on('data'), child.on('exit'|'error') + the .off() teardown).
+// stdout/stderr EventEmitter pair, matching the surface waitForDashboardPort
+// consumes (child.stdout|stderr.on('data'), child.on('exit'|'error') + the
+// .off() teardown).
 function makeFakeChild() {
   const child = new EventEmitter()
   child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter()
   return child
 }
 
@@ -84,6 +86,13 @@ test('resolves with the announced port', async () => {
   const p = waitForDashboardPort(child, 1000)
   child.stdout.emit('data', 'noise before\nHERMES_DASHBOARD_READY port=54321\n')
   assert.equal(await p, 54321)
+})
+
+test('resolves when the announced port is emitted on stderr', async () => {
+  const child = makeFakeChild()
+  const p = waitForDashboardPort(child, 1000)
+  child.stderr.emit('data', 'HERMES_DASHBOARD_READY port=54322\n')
+  assert.equal(await p, 54322)
 })
 
 test('parses the port even when the line arrives split across chunks', async () => {

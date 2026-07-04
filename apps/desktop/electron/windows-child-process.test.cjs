@@ -74,6 +74,30 @@ test('desktop backend launches console python so child consoles are inherited, n
   requireHiddenChildOptions(source, /hermesProcess = spawn\(\s*backend\.command,\s*backend\.args/)
 })
 
+test('desktop backend starts the port watcher before logging stdout', () => {
+  const source = readElectronFile('main.cjs')
+
+  for (const needle of ['const child = spawn(\n    backend.command', 'hermesProcess = spawn(\n      backend.command']) {
+    const spawnIndex = source.indexOf(needle)
+    assert.notEqual(spawnIndex, -1, `missing backend spawn: ${needle}`)
+    const snippet = source.slice(spawnIndex, spawnIndex + 2600)
+
+    const watcherIndex = snippet.indexOf('const portAnnouncement = waitForDashboardPortAnnouncement(')
+    const logIndex = snippet.indexOf(".stdout.on('data', rememberLog)")
+    assert.notEqual(watcherIndex, -1, `missing eager port watcher after ${needle}`)
+    assert.notEqual(logIndex, -1, `missing stdout log listener after ${needle}`)
+    assert.ok(
+      watcherIndex < logIndex,
+      `port watcher must attach before stdout logging for ${needle} so warm READY lines cannot be missed`
+    )
+    assert.match(
+      snippet,
+      /portAnnouncement\.catch\(\(\) => \{\}\)/,
+      `eager port watcher after ${needle} must be rejection-handled until awaited`
+    )
+  }
+})
+
 test('desktop backend teardown tree-kills Windows backend descendants', () => {
   const source = readElectronFile('main.cjs')
 

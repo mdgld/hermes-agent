@@ -5316,6 +5316,13 @@ async function spawnPoolBackend(profile, entry) {
   entry.process = child
   entry.token = token
 
+  // Start watching for the READY line immediately after spawn, before any
+  // awaited progress updates. Warm backends can announce in the same tick; if
+  // we attach this listener later, the log listener may see the line while the
+  // readiness waiter misses it and times out against an already-running server.
+  const portAnnouncement = waitForDashboardPortAnnouncement(child, { readyFile })
+  portAnnouncement.catch(() => {})
+
   child.stdout.on('data', rememberLog)
   child.stderr.on('data', rememberLog)
 
@@ -5340,7 +5347,7 @@ async function spawnPoolBackend(profile, entry) {
   })
 
   // Discover the ephemeral port the child bound to
-  const port = await Promise.race([waitForDashboardPortAnnouncement(child, { readyFile }), startFailed])
+  const port = await Promise.race([portAnnouncement, startFailed])
   if (readyFile) {
     fs.unlink(readyFile, () => {})
   }
@@ -5537,6 +5544,13 @@ async function startHermes() {
       })
     )
 
+    // Start watching for the READY line immediately after spawn, before any
+    // awaited progress updates. Warm backends can announce in the same tick; if
+    // we attach this listener later, the log listener may see the line while the
+    // readiness waiter misses it and times out against an already-running server.
+    const portAnnouncement = waitForDashboardPortAnnouncement(hermesProcess, { readyFile })
+    portAnnouncement.catch(() => {})
+
     hermesProcess.stdout.on('data', rememberLog)
     hermesProcess.stderr.on('data', rememberLog)
     let backendReady = false
@@ -5586,10 +5600,7 @@ async function startHermes() {
 
     await advanceBootProgress('backend.port', 'Waiting for Hermes backend to launch', 86)
     // Discover the ephemeral port the child bound to
-    const port = await Promise.race([
-      waitForDashboardPortAnnouncement(hermesProcess, { readyFile }),
-      backendStartFailed
-    ])
+    const port = await Promise.race([portAnnouncement, backendStartFailed])
     if (readyFile) {
       fs.unlink(readyFile, () => {})
     }
