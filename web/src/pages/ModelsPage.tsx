@@ -538,6 +538,8 @@ type PickerTarget =
 
 type MoaPickerTarget =
   | { kind: "reference"; index: number }
+  | { kind: "referenceFallback"; index: number }
+  | { kind: "aggregatorFallback"; index: number }
   | { kind: "aggregator" };
 
 function AuxiliaryTasksModal({
@@ -745,6 +747,8 @@ function MoaModelsModal({
     const seed = preset || {
       reference_models: draft.reference_models,
       aggregator: draft.aggregator,
+      reference_fallbacks: draft.reference_fallbacks,
+      aggregator_fallbacks: draft.aggregator_fallbacks,
       reference_temperature: draft.reference_temperature,
       aggregator_temperature: draft.aggregator_temperature,
       max_tokens: draft.max_tokens,
@@ -753,7 +757,15 @@ function MoaModelsModal({
     setDraft((prev) => ({
       ...prev,
       default_preset: prev.default_preset || name,
-      presets: { ...prev.presets, [name]: { ...seed, reference_models: [...seed.reference_models] } },
+      presets: {
+        ...prev.presets,
+        [name]: {
+          ...seed,
+          reference_models: [...seed.reference_models],
+          reference_fallbacks: [...(seed.reference_fallbacks || [])],
+          aggregator_fallbacks: [...(seed.aggregator_fallbacks || [])],
+        },
+      },
     }));
     setSelected(name);
     setNewName("");
@@ -825,11 +837,35 @@ function MoaModelsModal({
           </div>
 
           <div className="space-y-2">
+            <div className="text-display text-xs font-medium tracking-wider">Reference fallback chain</div>
+            {(preset.reference_fallbacks || []).map((slot, index) => (
+              <div key={`${selected}-ref-fallback-${slot.provider}-${slot.model}-${index}`} className="flex items-center gap-2 border border-border/50 bg-muted/20 px-3 py-2">
+                <div className="min-w-0 flex-1 truncate font-mono text-xs text-text-secondary">{slotLabel(slot)}</div>
+                <Button size="sm" outlined onClick={() => setPicker({ kind: "referenceFallback", index })}>Change</Button>
+                <Button size="sm" ghost onClick={() => updateSelectedPreset((prev) => ({ ...prev, reference_fallbacks: (prev.reference_fallbacks || []).filter((_, i) => i !== index) }))}>Remove</Button>
+              </div>
+            ))}
+            <Button size="sm" outlined onClick={() => updateSelectedPreset((prev) => ({ ...prev, reference_fallbacks: [...(prev.reference_fallbacks || []), prev.aggregator] }))}>Add reference fallback</Button>
+          </div>
+
+          <div className="space-y-2">
             <div className="text-display text-xs font-medium tracking-wider">Aggregator</div>
             <div className="flex items-center gap-2 border border-border/50 bg-muted/20 px-3 py-2">
               <div className="min-w-0 flex-1 truncate font-mono text-xs text-text-secondary">{slotLabel(preset.aggregator)}</div>
               <Button size="sm" outlined onClick={() => setPicker({ kind: "aggregator" })}>Change</Button>
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-display text-xs font-medium tracking-wider">Aggregator fallback chain</div>
+            {(preset.aggregator_fallbacks || []).map((slot, index) => (
+              <div key={`${selected}-agg-fallback-${slot.provider}-${slot.model}-${index}`} className="flex items-center gap-2 border border-border/50 bg-muted/20 px-3 py-2">
+                <div className="min-w-0 flex-1 truncate font-mono text-xs text-text-secondary">{slotLabel(slot)}</div>
+                <Button size="sm" outlined onClick={() => setPicker({ kind: "aggregatorFallback", index })}>Change</Button>
+                <Button size="sm" ghost onClick={() => updateSelectedPreset((prev) => ({ ...prev, aggregator_fallbacks: (prev.aggregator_fallbacks || []).filter((_, i) => i !== index) }))}>Remove</Button>
+              </div>
+            ))}
+            <Button size="sm" outlined onClick={() => updateSelectedPreset((prev) => ({ ...prev, aggregator_fallbacks: [...(prev.aggregator_fallbacks || []), prev.aggregator] }))}>Add aggregator fallback</Button>
           </div>
 
           {error && <div className="text-xs text-destructive">{error}</div>}
@@ -853,6 +889,18 @@ function MoaModelsModal({
             setError(null);
             updateSelectedPreset((prev) => {
               if (picker.kind === "aggregator") return { ...prev, aggregator: { provider, model } };
+              if (picker.kind === "referenceFallback") {
+                return {
+                  ...prev,
+                  reference_fallbacks: (prev.reference_fallbacks || []).map((slot, i) => i === picker.index ? { provider, model } : slot),
+                };
+              }
+              if (picker.kind === "aggregatorFallback") {
+                return {
+                  ...prev,
+                  aggregator_fallbacks: (prev.aggregator_fallbacks || []).map((slot, i) => i === picker.index ? { provider, model } : slot),
+                };
+              }
               return {
                 ...prev,
                 reference_models: prev.reference_models.map((slot, i) => i === picker.index ? { provider, model } : slot),

@@ -60,6 +60,23 @@ def _pick_slot(current: dict[str, str] | None = None) -> dict[str, str]:
     return {"provider": str(provider.get("slug") or ""), "model": str(model)}
 
 
+def _pick_slot_chain(title: str, existing: list[dict[str, str]] | None = None) -> list[dict[str, str]]:
+    print(title)
+    slots: list[dict[str, str]] = []
+    existing = list(existing or [])
+    idx = 0
+    choice = _prompt_choice("Add a fallback model?", ["Add fallback", "Done"], 1)
+    if choice == 1:
+        return slots
+    while True:
+        base = existing[idx] if idx < len(existing) else None
+        slots.append(_pick_slot(base))
+        idx += 1
+        choice = _prompt_choice("Add another fallback model?", ["Add another", "Done"], 1)
+        if choice == 1:
+            return slots
+
+
 def _print_config(config: dict[str, Any]) -> None:
     cfg = normalize_moa_config(config.get("moa") if isinstance(config, dict) else {})
     print("Mixture of Agents presets")
@@ -72,8 +89,18 @@ def _print_config(config: dict[str, Any]) -> None:
         print("  Reference models:")
         for idx, slot in enumerate(preset["reference_models"], start=1):
             print(f"    {idx}. {slot['provider']}:{slot['model']}")
+        ref_fallbacks = preset.get("reference_fallbacks") or []
+        if ref_fallbacks:
+            print("  Reference fallback chain:")
+            for idx, slot in enumerate(ref_fallbacks, start=1):
+                print(f"    {idx}. {slot['provider']}:{slot['model']}")
         agg = preset["aggregator"]
         print(f"  Aggregator: {agg['provider']}:{agg['model']}")
+        agg_fallbacks = preset.get("aggregator_fallbacks") or []
+        if agg_fallbacks:
+            print("  Aggregator fallback chain:")
+            for idx, slot in enumerate(agg_fallbacks, start=1):
+                print(f"    {idx}. {slot['provider']}:{slot['model']}")
 
 
 def cmd_moa(args) -> None:
@@ -104,7 +131,15 @@ def cmd_moa(args) -> None:
         print("Configure aggregator model.")
         current = dict(current)
         current["reference_models"] = refs
+        current["reference_fallbacks"] = _pick_slot_chain(
+            "Configure shared reference fallback chain.",
+            current.get("reference_fallbacks") or [],
+        )
         current["aggregator"] = _pick_slot(current.get("aggregator"))
+        current["aggregator_fallbacks"] = _pick_slot_chain(
+            "Configure aggregator fallback chain.",
+            current.get("aggregator_fallbacks") or [],
+        )
         moa["presets"][preset_name] = current
         moa.setdefault("default_preset", preset_name)
         cfg["moa"] = normalize_moa_config(moa)

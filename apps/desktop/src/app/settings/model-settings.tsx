@@ -920,7 +920,12 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                   ...moa,
                   presets: {
                     ...moa.presets,
-                    [name]: { ...currentMoaPreset, reference_models: [...currentMoaPreset.reference_models] }
+                    [name]: {
+                      ...currentMoaPreset,
+                      reference_models: [...currentMoaPreset.reference_models],
+                      reference_fallbacks: [...(currentMoaPreset.reference_fallbacks || [])],
+                      aggregator_fallbacks: [...(currentMoaPreset.aggregator_fallbacks || [])]
+                    }
                   }
                 }
 

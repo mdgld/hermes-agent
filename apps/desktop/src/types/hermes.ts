@@ -400,6 +400,9 @@ export interface SessionRuntimeInfo {
   desktop_contract?: number
   fast?: boolean
   model?: string
+  moa_aggregator_model?: string
+  moa_aggregator_provider?: string
+  moa_reference_count?: number
   personality?: string
   provider?: string
   reasoning_effort?: string
@@ -862,17 +865,21 @@ export interface MoaConfigResponse {
     string,
     {
       aggregator: MoaModelSlot
+      aggregator_fallbacks: MoaModelSlot[]
       aggregator_temperature: number
       enabled: boolean
       max_tokens: number
+      reference_fallbacks: MoaModelSlot[]
       reference_models: MoaModelSlot[]
       reference_temperature: number
     }
   >
   aggregator: MoaModelSlot
+  aggregator_fallbacks: MoaModelSlot[]
   aggregator_temperature: number
   enabled: boolean
   max_tokens: number
+  reference_fallbacks: MoaModelSlot[]
   reference_models: MoaModelSlot[]
   reference_temperature: number
 }

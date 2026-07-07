@@ -944,6 +944,8 @@ class MoaModelSlot(BaseModel):
 class MoaPresetPayload(BaseModel):
     reference_models: list[MoaModelSlot] = []
     aggregator: MoaModelSlot = MoaModelSlot()
+    reference_fallbacks: list[MoaModelSlot] = []
+    aggregator_fallbacks: list[MoaModelSlot] = []
     # None = temperature omitted from API calls (provider default), matching
     # single-model agent behavior.
     reference_temperature: Optional[float] = None
@@ -960,11 +962,19 @@ class MoaConfigPayload(BaseModel):
     # clients during this PR's transition window.
     reference_models: list[MoaModelSlot] = []
     aggregator: MoaModelSlot = MoaModelSlot()
+    reference_fallbacks: list[MoaModelSlot] = []
+    aggregator_fallbacks: list[MoaModelSlot] = []
     reference_temperature: Optional[float] = None
     aggregator_temperature: Optional[float] = None
     max_tokens: int = 4096
     enabled: bool = True
     profile: Optional[str] = None
+
+
+def _moa_slot_payload(slot: MoaModelSlot) -> dict[str, str]:
+    if hasattr(slot, "model_dump"):
+        return slot.model_dump()
+    return slot.dict()
 
 
 def _normalize_main_model_assignment(provider: str, model: str) -> tuple[str, str]:
@@ -4386,8 +4396,14 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
                     "active_preset": body.active_preset,
                     "presets": {
                         name: {
-                            "reference_models": [slot.dict() for slot in preset.reference_models],
-                            "aggregator": preset.aggregator.dict(),
+                            "reference_models": [_moa_slot_payload(slot) for slot in preset.reference_models],
+                            "aggregator": _moa_slot_payload(preset.aggregator),
+                            "reference_fallbacks": [
+                                _moa_slot_payload(slot) for slot in preset.reference_fallbacks
+                            ],
+                            "aggregator_fallbacks": [
+                                _moa_slot_payload(slot) for slot in preset.aggregator_fallbacks
+                            ],
                             "reference_temperature": preset.reference_temperature,
                             "aggregator_temperature": preset.aggregator_temperature,
                             "max_tokens": preset.max_tokens,
@@ -4397,13 +4413,36 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
                     },
                 }
             else:
+                existing = normalize_moa_config(cfg.get("moa") if isinstance(cfg, dict) else {})
+                default_name = str(body.default_preset or existing.get("default_preset") or "default").strip()
+                active_name = str(body.active_preset or existing.get("active_preset") or "").strip()
+                target_name = active_name or default_name
+                presets = {
+                    name: dict(preset)
+                    for name, preset in (existing.get("presets") or {}).items()
+                }
+                current = dict(presets.get(target_name) or {})
+                current.update(
+                    {
+                        "reference_models": [_moa_slot_payload(slot) for slot in body.reference_models],
+                        "aggregator": _moa_slot_payload(body.aggregator),
+                        "reference_fallbacks": [
+                            _moa_slot_payload(slot) for slot in body.reference_fallbacks
+                        ],
+                        "aggregator_fallbacks": [
+                            _moa_slot_payload(slot) for slot in body.aggregator_fallbacks
+                        ],
+                        "reference_temperature": body.reference_temperature,
+                        "aggregator_temperature": body.aggregator_temperature,
+                        "max_tokens": body.max_tokens,
+                        "enabled": body.enabled,
+                    }
+                )
+                presets[target_name] = current
                 raw = {
-                    "reference_models": [slot.dict() for slot in body.reference_models],
-                    "aggregator": body.aggregator.dict(),
-                    "reference_temperature": body.reference_temperature,
-                    "aggregator_temperature": body.aggregator_temperature,
-                    "max_tokens": body.max_tokens,
-                    "enabled": body.enabled,
+                    "default_preset": default_name,
+                    "active_preset": active_name if active_name in presets else "",
+                    "presets": presets,
                 }
             normalized = normalize_moa_config(raw)
             cfg["moa"] = normalized

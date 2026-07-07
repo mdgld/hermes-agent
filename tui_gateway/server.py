@@ -2603,21 +2603,6 @@ def _persist_model_switch(result) -> None:
         save_config_value("model.base_url", None)
 
 
-def _get_model_router_manager():
-    """Return the loaded model-router manager API, if the plugin is available."""
-    try:
-        from hermes_cli.plugins import get_plugin_manager
-
-        mgr = get_plugin_manager()
-        if getattr(mgr, "router_pin_session", None) is None and hasattr(
-            mgr, "discover_and_load"
-        ):
-            mgr.discover_and_load()
-        return mgr
-    except Exception:
-        return None
-
-
 def _router_session_ids_for_tui_session(sid: str, session: dict | None) -> list[str]:
     """Router keys can be the UI sid, stored session key, or live agent session id."""
     seen: set[str] = set()
@@ -2641,23 +2626,11 @@ def _pin_model_router_for_tui_session(
     sid: str, session: dict | None, model: str
 ) -> None:
     """Make desktop/TUI manual model picks override model-router auto-routing."""
-    model = str(model or "").strip()
-    if not model or not isinstance(session, dict):
+    if not isinstance(session, dict):
         return
-    mgr = _get_model_router_manager()
-    pin_fn = getattr(mgr, "router_pin_session", None) if mgr is not None else None
-    if not callable(pin_fn):
-        return
-    for router_sid in _router_session_ids_for_tui_session(sid, session):
-        try:
-            pin_fn(router_sid, model)
-        except Exception:
-            logger.debug(
-                "failed to pin model-router session %s to %s",
-                router_sid,
-                model,
-                exc_info=True,
-            )
+    from hermes_cli.model_router_pin import pin_model_router_sessions
+
+    pin_model_router_sessions(_router_session_ids_for_tui_session(sid, session), model)
 
 
 def _apply_model_switch(
@@ -3150,6 +3123,25 @@ def _current_profile_name() -> str:
 DESKTOP_BACKEND_CONTRACT = 2
 
 
+def _moa_runtime_info(agent) -> dict[str, Any]:
+    if str(getattr(agent, "provider", "") or "").strip().lower() != "moa":
+        return {}
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.moa_config import resolve_moa_preset
+
+        preset = resolve_moa_preset(load_config().get("moa") or {}, getattr(agent, "model", "") or "")
+        aggregator = preset.get("aggregator") or {}
+        references = preset.get("reference_models") or []
+        return {
+            "moa_aggregator_model": str(aggregator.get("model") or ""),
+            "moa_aggregator_provider": str(aggregator.get("provider") or ""),
+            "moa_reference_count": len(references) if isinstance(references, list) else 0,
+        }
+    except Exception:
+        return {}
+
+
 def _session_info(agent, session: dict | None = None) -> dict:
     if session is None:
         for candidate in _sessions.values():
@@ -3216,6 +3208,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "usage": _get_usage(agent),
         "profile_name": _current_profile_name(),
     }
+    info.update(_moa_runtime_info(agent))
     try:
         from hermes_cli import __version__, __release_date__
 

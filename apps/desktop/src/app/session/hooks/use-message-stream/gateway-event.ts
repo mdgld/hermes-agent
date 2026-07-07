@@ -30,6 +30,9 @@ import {
   setCurrentPersonality,
   setCurrentProvider,
   setCurrentReasoningEffort,
+  setMoaAggregatorModel,
+  setMoaAggregatorProvider,
+  setMoaReferenceCount,
   setCurrentServiceTier,
   setCurrentUsage,
   setSessions,
@@ -123,6 +126,10 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           if (providerChanged) {
             setCurrentProvider(payload!.provider || '')
           }
+
+          setMoaAggregatorModel(typeof payload?.moa_aggregator_model === 'string' ? payload.moa_aggregator_model : '')
+          setMoaAggregatorProvider(typeof payload?.moa_aggregator_provider === 'string' ? payload.moa_aggregator_provider : '')
+          setMoaReferenceCount(typeof payload?.moa_reference_count === 'number' ? payload.moa_reference_count : 0)
 
           if (typeof payload?.cwd === 'string') {
             // The active session's agent can relocate itself (new repo/worktree

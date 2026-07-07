@@ -262,6 +262,9 @@ export const $resumeFailedSessionId = atom<string | null>(null)
 export const $resumeExhaustedSessionId = atom<string | null>(null)
 export const $currentModel = atom(storedString(COMPOSER_MODEL_KEY) ?? '')
 export const $currentProvider = atom(storedString(COMPOSER_PROVIDER_KEY) ?? '')
+export const $moaAggregatorModel = atom('')
+export const $moaAggregatorProvider = atom('')
+export const $moaReferenceCount = atom(0)
 export const $currentReasoningEffort = atom(storedString(COMPOSER_EFFORT_KEY) ?? '')
 export const $currentServiceTier = atom('')
 export const $currentFastMode = atom(storedBoolean(COMPOSER_FAST_KEY, false))
@@ -318,6 +321,10 @@ export const setCurrentProvider = (next: Updater<string>) => {
   updateAtom($currentProvider, next)
   persistString(COMPOSER_PROVIDER_KEY, $currentProvider.get() || null)
 }
+
+export const setMoaAggregatorModel = (next: Updater<string>) => updateAtom($moaAggregatorModel, next)
+export const setMoaAggregatorProvider = (next: Updater<string>) => updateAtom($moaAggregatorProvider, next)
+export const setMoaReferenceCount = (next: Updater<number>) => updateAtom($moaReferenceCount, next)
 
 export const setCurrentReasoningEffort = (next: Updater<string>) => {
   updateAtom($currentReasoningEffort, next)

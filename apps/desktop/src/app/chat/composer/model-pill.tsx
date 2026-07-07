@@ -15,6 +15,9 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  $moaAggregatorModel,
+  $moaAggregatorProvider,
+  $moaReferenceCount,
   setModelPickerOpen
 } from '@/store/session'
 
@@ -42,6 +45,9 @@ export function ModelPill({
   const copy = useI18n().t.shell.statusbar
   const currentModel = useStore($currentModel)
   const currentProvider = useStore($currentProvider)
+  const moaAggregatorModel = useStore($moaAggregatorModel)
+  const moaAggregatorProvider = useStore($moaAggregatorProvider)
+  const moaReferenceCount = useStore($moaReferenceCount)
   const fastMode = useStore($currentFastMode)
   const reasoningEffort = useStore($currentReasoningEffort)
   const [open, setOpen] = useState(false)
@@ -54,7 +60,11 @@ export function ModelPill({
   ) : (
     <>
       {currentModel.trim() ? (
-        <span className="truncate">{formatModelStatusLabel(currentModel, { fastMode, reasoningEffort })}</span>
+        <span className="truncate">
+          {currentProvider === 'moa' && moaAggregatorModel
+            ? `MoA '${currentModel}' → ${moaAggregatorModel}`
+            : formatModelStatusLabel(currentModel, { fastMode, reasoningEffort })}
+        </span>
       ) : (
         <GlyphSpinner className="opacity-50" spinner="braille" />
       )}
@@ -71,7 +81,13 @@ export function ModelPill({
       )
     : PILL
 
-  const title = currentProvider ? copy.modelTitle(currentProvider, currentModel || copy.modelNone) : copy.switchModel
+  const moaTitle =
+    currentProvider === 'moa' && moaAggregatorModel
+      ? `MoA preset '${currentModel || copy.modelNone}' → aggregator ${
+          moaAggregatorProvider ? `${moaAggregatorProvider}/` : ''
+        }${moaAggregatorModel}${moaReferenceCount ? ` (+ ${moaReferenceCount} reference models)` : ''}`
+      : ''
+  const title = moaTitle || (currentProvider ? copy.modelTitle(currentProvider, currentModel || copy.modelNone) : copy.switchModel)
 
   if (!model.modelMenuContent) {
     return (

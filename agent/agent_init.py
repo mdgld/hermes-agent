@@ -759,9 +759,13 @@ def init_agent(
             except Exception:
                 pass
 
+        if not agent.model:
+            from hermes_cli.moa_config import resolve_default_moa_preset_name
+            agent.model = resolve_default_moa_preset_name()
         agent.client = MoAClient(
-            agent.model or "default",
+            agent.model,
             reference_callback=_moa_reference_relay,
+            agent=agent,
         )
         agent._client_kwargs = {}
         agent.api_key = api_key or "moa-virtual-provider"

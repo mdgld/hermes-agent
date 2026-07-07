@@ -2093,12 +2093,13 @@ class GatewaySlashCommandsMixin:
                     )
 
             try:
-                from hermes_cli.plugins import get_plugin_manager
-                _router_mgr = get_plugin_manager()
-                _pin_fn = getattr(_router_mgr, "router_pin_session", None)
-                if _pin_fn:
-                    _pin_entry = self.session_store.get_or_create_session(source)
-                    _pin_fn(_pin_entry.session_id, result.new_model)
+                from hermes_cli.model_router_pin import pin_model_router_sessions_async
+
+                _pin_entry = self.session_store.get_or_create_session(source)
+                await pin_model_router_sessions_async(
+                    [_pin_entry.session_id],
+                    result.new_model,
+                )
             except Exception:
                 pass
 

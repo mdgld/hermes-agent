@@ -95,3 +95,43 @@ def test_openai_gpt55_pro_warns_for_nous_portal_pricing(monkeypatch):
     assert warning.input_cost_per_million == Decimal("25.000000")
     assert warning.output_cost_per_million == Decimal("125.000000")
     assert "did you mean to select openai/gpt-5.5?" in warning.message
+
+
+def test_moa_warning_resolves_aggregator_and_references(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "moa": {
+                "presets": {
+                    "review": {
+                        "enabled": True,
+                        "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+                        "reference_models": [
+                            {"provider": "nous", "model": "openai/gpt-5.5"},
+                            {"provider": "openrouter", "model": "cheap/model"},
+                        ],
+                    }
+                },
+                "default_preset": "review",
+            }
+        },
+    )
+    monkeypatch.setattr("agent.models_dev.get_model_info", lambda *_args, **_kwargs: None)
+
+    def fake_pricing(model, **_kwargs):
+        if model == "anthropic/claude-opus-4.8":
+            return PricingEntry(Decimal("30"), Decimal("150"), source="test-prices")
+        if model == "openai/gpt-5.5":
+            return PricingEntry(Decimal("21"), Decimal("80"), source="test-prices")
+        return PricingEntry(Decimal("1"), Decimal("1"), source="test-prices")
+
+    monkeypatch.setattr("agent.usage_pricing.get_pricing_entry", fake_pricing)
+
+    warning = expensive_model_warning("review", provider="moa")
+
+    assert warning is not None
+    assert warning.provider == "moa"
+    assert "MoA preset 'review'" in warning.message
+    assert "aggregator: anthropic/claude-opus-4.8" in warning.message
+    assert "reference: openai/gpt-5.5" in warning.message
+    assert "cheap/model" not in warning.message

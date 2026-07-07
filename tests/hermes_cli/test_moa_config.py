@@ -281,3 +281,73 @@ def test_reference_max_tokens_in_flattened_view():
     active preset's reference_max_tokens."""
     cfg = normalize_moa_config(_preset(reference_max_tokens=750))
     assert cfg["reference_max_tokens"] == 750
+
+
+def test_fallback_chains_default_empty_and_round_trip_to_flat_view():
+    cfg = normalize_moa_config(
+        _preset(
+            reference_fallbacks=[{"provider": "openrouter", "model": "fallback/ref"}],
+            aggregator_fallbacks=[{"provider": "openai-codex", "model": "fallback/agg"}],
+        )
+    )
+
+    preset = cfg["presets"]["p"]
+    assert preset["reference_fallbacks"] == [
+        {"provider": "openrouter", "model": "fallback/ref"}
+    ]
+    assert preset["aggregator_fallbacks"] == [
+        {"provider": "openai-codex", "model": "fallback/agg"}
+    ]
+    assert cfg["reference_fallbacks"] == preset["reference_fallbacks"]
+    assert cfg["aggregator_fallbacks"] == preset["aggregator_fallbacks"]
+    assert normalize_moa_config({})["presets"][DEFAULT_MOA_PRESET_NAME][
+        "reference_fallbacks"
+    ] == []
+
+
+def test_moa_provider_rejected_from_fallback_slots():
+    cfg = normalize_moa_config(
+        _preset(
+            reference_fallbacks=[
+                {"provider": "moa", "model": "recursive"},
+                {"provider": "openrouter", "model": "fallback/ref"},
+            ],
+            aggregator_fallbacks=[
+                {"provider": "MoA", "model": "recursive"},
+                {"provider": "openai-codex", "model": "fallback/agg"},
+            ],
+        )
+    )
+
+    preset = cfg["presets"]["p"]
+    assert preset["reference_fallbacks"] == [
+        {"provider": "openrouter", "model": "fallback/ref"}
+    ]
+    assert preset["aggregator_fallbacks"] == [
+        {"provider": "openai-codex", "model": "fallback/agg"}
+    ]
+
+
+def test_normalize_moa_config_flat_view_uses_active_preset_when_set():
+    cfg = normalize_moa_config(
+        {
+            "default_preset": "cheap",
+            "active_preset": "review",
+            "presets": {
+                "cheap": {
+                    "aggregator": {"provider": "openrouter", "model": "cheap/model"},
+                    "reference_models": [],
+                    "enabled": True,
+                },
+                "review": {
+                    "aggregator": {"provider": "openrouter", "model": "expensive/model"},
+                    "reference_models": [{"provider": "nous", "model": "advisor/model"}],
+                    "enabled": True,
+                },
+            },
+        }
+    )
+
+    assert cfg["active_preset"] == "review"
+    assert cfg["aggregator"]["model"] == "expensive/model"
+    assert cfg["reference_models"] == [{"provider": "nous", "model": "advisor/model"}]

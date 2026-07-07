@@ -510,6 +510,47 @@ class TestWebServerEndpoints:
         assert cfg["moa"]["reference_models"] == payload["reference_models"]
         assert cfg["moa"]["aggregator"] == payload["aggregator"]
 
+    def test_put_moa_legacy_flat_payload_preserves_other_presets(self):
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["moa"] = {
+            "default_preset": "coding",
+            "active_preset": "coding",
+            "presets": {
+                "coding": {
+                    "reference_models": [{"provider": "openrouter", "model": "old-ref"}],
+                    "aggregator": {"provider": "openrouter", "model": "old-agg"},
+                    "enabled": True,
+                },
+                "review": {
+                    "reference_models": [{"provider": "openai-codex", "model": "review-ref"}],
+                    "aggregator": {"provider": "openai-codex", "model": "review-agg"},
+                    "enabled": True,
+                },
+            },
+        }
+        save_config(cfg)
+
+        payload = {
+            "default_preset": "coding",
+            "active_preset": "coding",
+            "reference_models": [{"provider": "openrouter", "model": "new-ref"}],
+            "aggregator": {"provider": "openrouter", "model": "new-agg"},
+            "reference_fallbacks": [{"provider": "openai-codex", "model": "ref-fb"}],
+            "aggregator_fallbacks": [{"provider": "openai-codex", "model": "agg-fb"}],
+            "enabled": True,
+        }
+
+        resp = self.client.put("/api/model/moa", json=payload)
+        assert resp.status_code == 200
+        saved = load_config()["moa"]
+        assert {"coding", "review"}.issubset(set(saved["presets"]))
+        assert saved["presets"]["coding"]["aggregator"] == payload["aggregator"]
+        assert saved["presets"]["coding"]["reference_fallbacks"] == payload["reference_fallbacks"]
+        assert saved["presets"]["coding"]["aggregator_fallbacks"] == payload["aggregator_fallbacks"]
+        assert saved["presets"]["review"]["aggregator"]["model"] == "review-agg"
+
     # ── GET /api/media (remote image display) ───────────────────────────
 
     def test_get_media_serves_image_in_root(self):

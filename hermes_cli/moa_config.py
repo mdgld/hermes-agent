@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from copy import deepcopy
 from typing import Any
 
 MOA_MARKER_PREFIX = "__HERMES_MOA_TURN_V1__"
+logger = logging.getLogger(__name__)
+
 DEFAULT_MOA_PRESET_NAME = "default"
 
 DEFAULT_MOA_REFERENCE_MODELS: list[dict[str, str]] = [
@@ -90,10 +93,20 @@ def _clean_slot(slot: Any) -> dict[str, str] | None:
     return {"provider": provider, "model": model}
 
 
+def _clean_slot_list(raw_slots: Any) -> list[dict[str, str]]:
+    """Return validated provider/model slots, dropping invalid entries."""
+    if not isinstance(raw_slots, list):
+        raw_slots = [raw_slots] if isinstance(raw_slots, dict) else []
+    slots = [_clean_slot(item) for item in raw_slots]
+    return [item for item in slots if item is not None]
+
+
 def _default_preset() -> dict[str, Any]:
     return {
         "reference_models": deepcopy(DEFAULT_MOA_REFERENCE_MODELS),
         "aggregator": deepcopy(DEFAULT_MOA_AGGREGATOR),
+        "reference_fallbacks": [],
+        "aggregator_fallbacks": [],
         # None = temperature omitted from API calls (provider default),
         # matching single-model agent behavior.
         "reference_temperature": None,
@@ -110,13 +123,10 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         raw = {}
 
     raw_refs = raw.get("reference_models")
-    if not isinstance(raw_refs, list):
-        # A hand-edited scalar / single mapping (or a bad type) must degrade to
-        # defaults instead of crashing the iteration, mirroring the tolerance
-        # for the scalar fields below (reference_temperature / max_tokens).
-        raw_refs = [raw_refs] if isinstance(raw_refs, dict) else []
-    refs = [_clean_slot(item) for item in raw_refs]
-    refs = [item for item in refs if item is not None]
+    # A hand-edited scalar / single mapping (or a bad type) must degrade to
+    # defaults instead of crashing the iteration, mirroring the tolerance
+    # for the scalar fields below (reference_temperature / max_tokens).
+    refs = _clean_slot_list(raw_refs)
     if not refs:
         refs = deepcopy(DEFAULT_MOA_REFERENCE_MODELS)
 
@@ -126,6 +136,8 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         "enabled": bool(raw.get("enabled", True)),
         "reference_models": refs,
         "aggregator": aggregator,
+        "reference_fallbacks": _clean_slot_list(raw.get("reference_fallbacks")),
+        "aggregator_fallbacks": _clean_slot_list(raw.get("aggregator_fallbacks")),
         "reference_temperature": _coerce_float_or_none(raw.get("reference_temperature")),
         "aggregator_temperature": _coerce_float_or_none(raw.get("aggregator_temperature")),
         "max_tokens": _coerce_int(raw.get("max_tokens"), 4096),
@@ -179,7 +191,7 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
     if active_name not in presets:
         active_name = ""
 
-    active = presets[default_name]
+    active = presets[active_name] if active_name else presets[default_name]
     return {
         "default_preset": default_name,
         "active_preset": active_name,
@@ -187,6 +199,8 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
         # Compatibility/flattened view for existing dashboard/desktop callers.
         "reference_models": deepcopy(active["reference_models"]),
         "aggregator": deepcopy(active["aggregator"]),
+        "reference_fallbacks": deepcopy(active.get("reference_fallbacks") or []),
+        "aggregator_fallbacks": deepcopy(active.get("aggregator_fallbacks") or []),
         "reference_temperature": active["reference_temperature"],
         "aggregator_temperature": active["aggregator_temperature"],
         "max_tokens": active["max_tokens"],
@@ -201,6 +215,25 @@ def list_moa_presets(config: Any) -> list[str]:
     return list(cfg["presets"].keys())
 
 
+def resolve_default_moa_preset_name() -> str:
+    """Return the user's actual configured default MoA preset name.
+
+    Callers that need *some* preset name to pass to ``MoAClient`` when
+    ``agent.model`` is empty must not hardcode the literal string
+    ``"default"`` — a user's default/only preset is rarely named that (e.g.
+    ``opus-4-8-moa``), and passing a nonexistent name raises ``KeyError``
+    inside ``MoAChatCompletions.create()``. Falls back to
+    ``DEFAULT_MOA_PRESET_NAME`` only if config can't be loaded at all, in
+    which case nothing else would work either.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        return normalize_moa_config(load_config().get("moa") or {})["default_preset"]
+    except Exception:
+        return DEFAULT_MOA_PRESET_NAME
+
+
 def resolve_moa_preset(config: Any, name: str | None = None) -> dict[str, Any]:
     cfg = normalize_moa_config(config)
     preset_name = str(name or cfg.get("default_preset") or DEFAULT_MOA_PRESET_NAME).strip()
@@ -213,15 +246,10 @@ def resolve_moa_preset(config: Any, name: str | None = None) -> dict[str, Any]:
 def exact_moa_preset_name(config: Any, text: str) -> str | None:
     """Return the preset name iff ``text`` exactly matches an *enabled* preset.
 
-    Used by the no-explicit-provider switch path (PATH B in
-    ``hermes_cli/model_switch.py``) to recognize a bare ``/model <preset>``
-    that the user typed without the ``moa:`` prefix. This is an *implicit*
-    match, so it must honor the per-preset ``enabled`` opt-out: a user who set
-    ``enabled: false`` to disable a preset must not have a plain model switch
-    whose name happens to collide with that preset key silently pivot the
-    session onto the MoA virtual provider (issue #55187). Explicit selection
-    via ``--provider moa`` / the model picker does not go through here, so a
-    disabled preset is still reachable when the user explicitly asks for it.
+    This helper is intentionally strict for implicit bare-name lookups: a user
+    who set ``enabled: false`` to disable a preset must not have a plain model
+    switch whose name happens to collide with that preset key silently pivot
+    the session onto the MoA virtual provider (issue #55187).
     """
     wanted = str(text or "").strip()
     if not wanted:
@@ -239,6 +267,7 @@ def set_active_moa_preset(config: Any, name: str | None) -> dict[str, Any]:
     if clean and clean not in cfg["presets"]:
         raise KeyError(clean)
     cfg["active_preset"] = clean
+    logger.info("MoA active_preset set to %r", clean)
     return cfg
 
 

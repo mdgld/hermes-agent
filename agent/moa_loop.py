@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -119,6 +120,122 @@ _REFERENCE_SYSTEM_PROMPT = (
 
 
 
+def _moa_hook_ids(agent: Any, suffix: str) -> tuple[str, str, str, str]:
+    if agent is None:
+        return "", "", "", suffix
+    task_id = str(getattr(agent, "_current_task_id", "") or "")
+    turn_id = str(getattr(agent, "_current_turn_id", "") or "")
+    session_id = str(getattr(agent, "session_id", "") or "")
+    base_count = getattr(agent, "_api_call_count", 0) or 0
+    return task_id, turn_id, session_id, f"{base_count}.{suffix}"
+
+
+def _invoke_moa_pre_api_request(
+    *,
+    agent: Any,
+    turn_type: str,
+    api_call_count: str,
+    messages: list[dict[str, Any]],
+    model: str,
+    provider: str,
+    base_url: str = "",
+    api_mode: str = "",
+    started_at: float = 0.0,
+) -> None:
+    if agent is None:
+        return
+    try:
+        from hermes_cli.plugins import has_hook, invoke_hook
+
+        if not has_hook("pre_api_request"):
+            return
+        task_id, turn_id, session_id, _ = _moa_hook_ids(agent, api_call_count)
+        invoke_hook(
+            "pre_api_request",
+            task_id=task_id,
+            turn_id=turn_id,
+            api_request_id=str(api_call_count),
+            session_id=session_id,
+            platform=getattr(agent, "platform", "") or "",
+            model=model,
+            provider=provider,
+            base_url=base_url,
+            api_mode=api_mode,
+            api_call_count=api_call_count,
+            request_messages=list(messages),
+            message_count=len(messages),
+            tool_count=0,
+            approx_input_tokens=0,
+            request_char_count=sum(len(str(m.get("content") or "")) for m in messages),
+            max_tokens=None,
+            started_at=started_at,
+            turn_type=turn_type,
+            # The outer agent/session identity (e.g. provider="moa",
+            # model=<preset>), distinct from `provider`/`model` above which
+            # describe THIS sub-call's own slot. A reference or aggregator
+            # sub-call can race the turn's own top-level pre_api_request and
+            # end up being the one that creates the shared root trace for this
+            # task_key — when that happens, the root must still be stamped
+            # with the session's real identity, not the racing sub-call's.
+            root_provider=str(getattr(agent, "provider", "") or ""),
+            root_model=str(getattr(agent, "model", "") or ""),
+        )
+    except Exception:
+        pass
+
+
+def _invoke_moa_post_api_request(
+    *,
+    agent: Any,
+    turn_type: str,
+    api_call_count: str,
+    response: Any,
+    output_text: str,
+    model: str,
+    provider: str,
+    base_url: str = "",
+    api_mode: str = "",
+    started_at: float = 0.0,
+    error: str = "",
+) -> None:
+    if agent is None:
+        return
+    try:
+        from hermes_cli.plugins import has_hook, invoke_hook
+
+        if not has_hook("post_api_request"):
+            return
+        ended_at = time.time()
+        task_id, turn_id, session_id, _ = _moa_hook_ids(agent, api_call_count)
+        invoke_hook(
+            "post_api_request",
+            task_id=task_id,
+            turn_id=turn_id,
+            api_request_id=str(api_call_count),
+            session_id=session_id,
+            platform=getattr(agent, "platform", "") or "",
+            model=model,
+            provider=provider,
+            base_url=base_url,
+            api_mode=api_mode,
+            api_call_count=api_call_count,
+            api_duration=max(0.0, ended_at - started_at) if started_at else 0.0,
+            started_at=started_at,
+            ended_at=ended_at,
+            finish_reason="error" if error else "",
+            message_count=0,
+            response=response,
+            usage={},
+            assistant_response=output_text,
+            assistant_content_chars=len(output_text or ""),
+            assistant_tool_call_count=0,
+            turn_type=turn_type,
+            error=error,
+        )
+    except Exception:
+        pass
+
+
 def _slot_label(slot: dict[str, str]) -> str:
     return f"{slot.get('provider', '').strip()}:{slot.get('model', '').strip()}"
 
@@ -173,6 +290,33 @@ def _slot_runtime(slot: dict[str, str]) -> dict[str, Any]:
     return out
 
 
+_MOA_FALLBACK_REASONS: set[Any] | None = None
+
+
+def _is_moa_fallback_worthy(exc: Exception, slot: dict[str, str], runtime: dict[str, Any]) -> bool:
+    """Return True when a MoA sub-call should try its configured fallback chain."""
+    global _MOA_FALLBACK_REASONS
+    try:
+        from agent.error_classifier import FailoverReason, classify_api_error
+
+        if _MOA_FALLBACK_REASONS is None:
+            _MOA_FALLBACK_REASONS = {
+                FailoverReason.rate_limit,
+                FailoverReason.billing,
+                FailoverReason.upstream_rate_limit,
+                FailoverReason.timeout,
+                FailoverReason.overloaded,
+            }
+        classified = classify_api_error(
+            exc,
+            provider=str(runtime.get("provider") or slot.get("provider") or ""),
+            model=str(runtime.get("model") or slot.get("model") or ""),
+        )
+        return classified.reason in _MOA_FALLBACK_REASONS
+    except Exception:
+        return False
+
+
 def _maybe_apply_advisor_cache_control(
     messages: list[dict[str, Any]],
     runtime: dict[str, Any],
@@ -220,8 +364,11 @@ def _run_reference(
     slot: dict[str, str],
     ref_messages: list[dict[str, Any]],
     *,
+    reference_fallbacks: list[dict[str, str]] | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    agent: Any = None,
+    reference_index: int = 0,
 ) -> tuple[str, str, Any]:
     """Call one reference model and return ``(label, text, usage)``.
 
@@ -249,14 +396,21 @@ def _run_reference(
     """
     from agent.usage_pricing import CanonicalUsage, estimate_usage_cost, normalize_usage
 
-    label = _slot_label(slot)
-    runtime = _slot_runtime(slot)
-    try:
+    primary_label = _slot_label(slot)
+    attempts = [slot, *(reference_fallbacks or [])]
+    last_exc: Exception | None = None
+    last_messages = [{"role": "system", "content": _REFERENCE_SYSTEM_PROMPT}, *ref_messages]
+    last_runtime: dict[str, Any] = _slot_runtime(slot)
+    for attempt_idx, attempt_slot in enumerate(attempts):
+        label = _slot_label(attempt_slot)
+        runtime = _slot_runtime(attempt_slot)
+        last_runtime = runtime
         # Prepend the advisory-role system prompt so the reference understands
         # it is analyzing state for an aggregator, not acting on the task. The
         # trimmed view (_reference_messages) already strips the agent's own
         # system prompt, so this is the only system message the reference sees.
         messages = [{"role": "system", "content": _REFERENCE_SYSTEM_PROMPT}, *ref_messages]
+        last_messages = messages
         # Apply the same Anthropic-style prompt-caching decoration the main
         # agent loop applies (system_and_3 breakpoints). The advisory view is
         # append-only across iterations (new turns append before the trailing
@@ -269,75 +423,131 @@ def _run_reference(
         # (their caching is automatic; markers are ignored harmlessly, but we
         # only decorate when the policy says the route honors them).
         messages = _maybe_apply_advisor_cache_control(messages, runtime)
-        response = call_llm(
-            task="moa_reference",
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **runtime,
-        )
-        usage = CanonicalUsage()
-        raw_usage = getattr(response, "usage", None)
-        if raw_usage:
-            try:
-                usage = normalize_usage(
-                    raw_usage,
-                    provider=runtime.get("provider"),
-                    api_mode=runtime.get("api_mode"),
-                )
-            except Exception:  # pragma: no cover - defensive
-                usage = CanonicalUsage()
-        # Price this advisor at ITS OWN model/provider rate (with correct
-        # cache-read/cache-write split), not the aggregator's. This is why
-        # advisor cost is summed as dollars rather than by folding tokens into
-        # the aggregator's usage.
-        cost_usd = None
-        cost_status = None
-        cost_source = None
+        _api_call_count = _moa_hook_ids(agent, f"ref.{reference_index or 0}")[3]
+        _started_at = time.time()
         try:
-            cost = estimate_usage_cost(
-                slot.get("model") or "",
-                usage,
-                provider=runtime.get("provider"),
-                base_url=runtime.get("base_url"),
-                api_key=runtime.get("api_key"),
+            _invoke_moa_pre_api_request(
+                agent=agent,
+                turn_type="moa_reference",
+                api_call_count=_api_call_count,
+                messages=messages,
+                model=str(attempt_slot.get("model") or ""),
+                provider=str(runtime.get("provider") or attempt_slot.get("provider") or ""),
+                base_url=str(runtime.get("base_url") or ""),
+                api_mode=str(runtime.get("api_mode") or ""),
+                started_at=_started_at,
             )
-            cost_usd = cost.amount_usd
-            cost_status = cost.status
-            cost_source = cost.source
-        except Exception:  # pragma: no cover - defensive
-            pass
-        _output_text = _extract_text(response) or "(empty response)"
-        acct = _RefAccounting(
-            usage,
-            cost_usd,
-            cost_status,
-            cost_source,
-            messages=messages,
-            output=_output_text,
-            model=slot.get("model"),
-            provider=runtime.get("provider") or slot.get("provider"),
-            temperature=temperature,
-        )
-        return label, _output_text, acct
-    except Exception as exc:
-        logger.warning("MoA reference model %s failed: %s", label, exc)
-        return label, f"[failed: {exc}]", _RefAccounting(
-            CanonicalUsage(),
-            messages=[{"role": "system", "content": _REFERENCE_SYSTEM_PROMPT}, *ref_messages],
-            output=f"[failed: {exc}]",
-            model=slot.get("model"),
-            provider=runtime.get("provider") or slot.get("provider"),
-            temperature=temperature,
-        )
+            response = call_llm(
+                task="moa_reference",
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **runtime,
+            )
+            usage = CanonicalUsage()
+            raw_usage = getattr(response, "usage", None)
+            if raw_usage:
+                try:
+                    usage = normalize_usage(
+                        raw_usage,
+                        provider=runtime.get("provider"),
+                        api_mode=runtime.get("api_mode"),
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    usage = CanonicalUsage()
+            # Price this advisor at ITS OWN model/provider rate (with correct
+            # cache-read/cache-write split), not the aggregator's. This is why
+            # advisor cost is summed as dollars rather than by folding tokens into
+            # the aggregator's usage.
+            cost_usd = None
+            cost_status = None
+            cost_source = None
+            try:
+                cost = estimate_usage_cost(
+                    attempt_slot.get("model") or "",
+                    usage,
+                    provider=runtime.get("provider"),
+                    base_url=runtime.get("base_url"),
+                    api_key=runtime.get("api_key"),
+                )
+                cost_usd = cost.amount_usd
+                cost_status = cost.status
+                cost_source = cost.source
+            except Exception:  # pragma: no cover - defensive
+                pass
+            _output_text = _extract_text(response) or "(empty response)"
+            _invoke_moa_post_api_request(
+                agent=agent,
+                turn_type="moa_reference",
+                api_call_count=_api_call_count,
+                response=response,
+                output_text=_output_text,
+                model=str(attempt_slot.get("model") or ""),
+                provider=str(runtime.get("provider") or attempt_slot.get("provider") or ""),
+                base_url=str(runtime.get("base_url") or ""),
+                api_mode=str(runtime.get("api_mode") or ""),
+                started_at=_started_at,
+            )
+            if attempt_idx:
+                logger.info(
+                    "MoA reference model %s served by fallback %s",
+                    primary_label,
+                    label,
+                )
+            acct = _RefAccounting(
+                usage,
+                cost_usd,
+                cost_status,
+                cost_source,
+                messages=messages,
+                output=_output_text,
+                model=attempt_slot.get("model"),
+                provider=runtime.get("provider") or attempt_slot.get("provider"),
+                temperature=temperature,
+            )
+            served_label = label if not attempt_idx else f"{primary_label} → fallback {label}"
+            return served_label, _output_text, acct
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("MoA reference model %s failed: %s", label, exc)
+            _invoke_moa_post_api_request(
+                agent=agent,
+                turn_type="moa_reference",
+                api_call_count=_api_call_count,
+                response=None,
+                output_text="",
+                model=str(attempt_slot.get("model") or ""),
+                provider=str(runtime.get("provider") or attempt_slot.get("provider") or ""),
+                base_url=str(runtime.get("base_url") or ""),
+                api_mode=str(runtime.get("api_mode") or ""),
+                started_at=_started_at,
+                error=str(exc),
+            )
+            if attempt_idx < len(attempts) - 1 and _is_moa_fallback_worthy(
+                exc, attempt_slot, runtime
+            ):
+                continue
+            break
+
+    failed_text = f"[failed: {last_exc}]"
+    return primary_label, failed_text, _RefAccounting(
+        CanonicalUsage(),
+        messages=last_messages,
+        output=failed_text,
+        model=slot.get("model"),
+        provider=last_runtime.get("provider") or slot.get("provider"),
+        temperature=temperature,
+    )
 
 
 def _run_references_parallel(
     reference_models: list[dict[str, str]],
     ref_messages: list[dict[str, Any]],
     *,
+    reference_fallbacks: list[dict[str, str]] | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    agent: Any = None,
 ) -> list[tuple[str, str, Any]]:
     """Fan out all reference models in parallel, returning outputs in order.
 
@@ -372,8 +582,11 @@ def _run_references_parallel(
                     _run_reference,
                     slot,
                     ref_messages,
+                    reference_fallbacks=reference_fallbacks,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    agent=agent,
+                    reference_index=idx + 1,
                 )
             ] = idx
         # Collect every reference before returning — the aggregator needs the
@@ -573,9 +786,12 @@ def aggregate_moa_context(
     api_messages: list[dict[str, Any]],
     reference_models: list[dict[str, str]],
     aggregator: dict[str, str],
+    reference_fallbacks: list[dict[str, str]] | None = None,
+    aggregator_fallbacks: list[dict[str, str]] | None = None,
     temperature: float | None = None,
     aggregator_temperature: float | None = None,
     max_tokens: int | None = None,
+    agent: Any = None,
 ) -> str:
     """Run configured reference models and synthesize their advice.
 
@@ -598,8 +814,10 @@ def aggregate_moa_context(
     reference_outputs = _run_references_parallel(
         reference_models,
         ref_messages,
+        reference_fallbacks=reference_fallbacks,
         temperature=temperature,
         max_tokens=max_tokens,
+        agent=agent,
     )
 
     joined = "\n\n".join(
@@ -617,18 +835,74 @@ def aggregate_moa_context(
     )
 
     agg_label = _slot_label(aggregator)
-    try:
-        response = call_llm(
-            task="moa_aggregator",
-            messages=[{"role": "user", "content": synth_prompt}],
-            temperature=aggregator_temperature,
-            max_tokens=max_tokens,
-            **_slot_runtime(aggregator),
-        )
-        synthesis = _extract_text(response)
-    except Exception as exc:
-        logger.warning("MoA aggregator model %s failed: %s", agg_label, exc)
-        synthesis = ""
+    synthesis = ""
+    attempts = [aggregator, *(aggregator_fallbacks or [])]
+    for attempt_idx, attempt_slot in enumerate(attempts):
+        agg_label = _slot_label(attempt_slot)
+        _agg_runtime = _slot_runtime(aggregator)
+        _api_call_count = _moa_hook_ids(agent, "agg")[3]
+        _started_at = time.time()
+        try:
+            _agg_runtime = _slot_runtime(attempt_slot)
+            _invoke_moa_pre_api_request(
+                agent=agent,
+                turn_type="moa_aggregator",
+                api_call_count=_api_call_count,
+                messages=[{"role": "user", "content": synth_prompt}],
+                model=str(attempt_slot.get("model") or ""),
+                provider=str(_agg_runtime.get("provider") or attempt_slot.get("provider") or ""),
+                base_url=str(_agg_runtime.get("base_url") or ""),
+                api_mode=str(_agg_runtime.get("api_mode") or ""),
+                started_at=_started_at,
+            )
+            response = call_llm(
+                task="moa_aggregator",
+                messages=[{"role": "user", "content": synth_prompt}],
+                temperature=aggregator_temperature,
+                max_tokens=max_tokens,
+                **_agg_runtime,
+            )
+            synthesis = _extract_text(response)
+            _invoke_moa_post_api_request(
+                agent=agent,
+                turn_type="moa_aggregator",
+                api_call_count=_api_call_count,
+                response=response,
+                output_text=synthesis,
+                model=str(attempt_slot.get("model") or ""),
+                provider=str(_agg_runtime.get("provider") or attempt_slot.get("provider") or ""),
+                base_url=str(_agg_runtime.get("base_url") or ""),
+                api_mode=str(_agg_runtime.get("api_mode") or ""),
+                started_at=_started_at,
+            )
+            if attempt_idx:
+                logger.info(
+                    "MoA aggregator model %s served by fallback %s",
+                    _slot_label(aggregator),
+                    agg_label,
+                )
+            break
+        except Exception as exc:
+            logger.warning("MoA aggregator model %s failed: %s", agg_label, exc)
+            _invoke_moa_post_api_request(
+                agent=agent,
+                turn_type="moa_aggregator",
+                api_call_count=_api_call_count,
+                response=None,
+                output_text="",
+                model=str(attempt_slot.get("model") or ""),
+                provider=str(_agg_runtime.get("provider") or attempt_slot.get("provider") or ""),
+                base_url=str(_agg_runtime.get("base_url") or ""),
+                api_mode=str(_agg_runtime.get("api_mode") or ""),
+                started_at=_started_at,
+                error=str(exc),
+            )
+            if attempt_idx < len(attempts) - 1 and _is_moa_fallback_worthy(
+                exc, attempt_slot, _agg_runtime
+            ):
+                continue
+            synthesis = ""
+            break
 
     if not synthesis:
         synthesis = joined
@@ -638,7 +912,7 @@ def aggregate_moa_context(
         "normal Hermes agent loop. You may call tools, continue reasoning, or "
         "finish normally.]\n"
         f"Aggregator: {agg_label}\n"
-        f"References: {', '.join(_slot_label(slot) for slot in reference_models)}\n\n"
+        f"References: {', '.join(label for label, _, _ in reference_outputs)}\n\n"
         f"{synthesis.strip()}"
     )
 
@@ -668,8 +942,9 @@ def _attach_reference_guidance(agg_messages: list[dict[str, Any]], guidance: str
 class MoAChatCompletions:
     """OpenAI-chat-compatible facade where the aggregator is the acting model."""
 
-    def __init__(self, preset_name: str, reference_callback: Any = None):
+    def __init__(self, preset_name: str, reference_callback: Any = None, agent: Any = None):
         self.preset_name = preset_name or "default"
+        self.agent = agent
         # Optional display hook. Called as reference outputs become available so
         # frontends can show each reference model's answer as a labelled block
         # before the aggregator acts. Signature:
@@ -790,6 +1065,8 @@ class MoAChatCompletions:
         messages = list(api_kwargs.get("messages") or [])
         reference_models = preset.get("reference_models") or []
         aggregator = preset.get("aggregator") or {}
+        reference_fallbacks = preset.get("reference_fallbacks") or []
+        aggregator_fallbacks = preset.get("aggregator_fallbacks") or []
         # Expose the resolved aggregator slot so session cost accounting can
         # price the aggregator's acting turn at its REAL model/provider. The
         # agent's model/provider on the MoA path are the virtual preset name
@@ -866,7 +1143,12 @@ class MoAChatCompletions:
                 f"{m.get('role')}:{m.get('content')}" for m in sig_messages
             ).encode("utf-8", "replace")
         ).hexdigest()
-        _cache_key = (self.preset_name, _sig, tuple(_slot_label(s) for s in reference_models))
+        _cache_key = (
+            self.preset_name,
+            _sig,
+            tuple(_slot_label(s) for s in reference_models),
+            tuple(_slot_label(s) for s in reference_fallbacks),
+        )
         _refs_from_cache = _cache_key == self._ref_cache_key and bool(self._ref_cache_outputs)
 
         if _refs_from_cache:
@@ -885,8 +1167,10 @@ class MoAChatCompletions:
             reference_outputs = _run_references_parallel(
                 reference_models,
                 ref_messages,
+                reference_fallbacks=reference_fallbacks,
                 temperature=temperature,
                 max_tokens=reference_max_tokens,
+                agent=self.agent,
             )
             self._ref_cache_key = _cache_key
             self._ref_cache_outputs = list(reference_outputs)
@@ -995,16 +1279,45 @@ class MoAChatCompletions:
             # actually governs the aggregator stream, not just call_llm's default.
             if api_kwargs.get("timeout") is not None:
                 stream_kwargs["timeout"] = api_kwargs["timeout"]
-        _agg_response = call_llm(
-            task="moa_aggregator",
-            messages=agg_messages,
-            temperature=aggregator_temperature,
-            max_tokens=agg_kwargs.get("max_tokens"),
-            tools=agg_kwargs.get("tools"),
-            extra_body=agg_kwargs.get("extra_body"),
-            **stream_kwargs,
-            **_slot_runtime(aggregator),
-        )
+        _agg_response = None
+        _agg_runtime = _slot_runtime(aggregator)
+        for _attempt_idx, _attempt_slot in enumerate([aggregator, *aggregator_fallbacks]):
+            _agg_runtime = _slot_runtime(_attempt_slot)
+            try:
+                _agg_response = call_llm(
+                    task="moa_aggregator",
+                    messages=agg_messages,
+                    temperature=aggregator_temperature,
+                    max_tokens=agg_kwargs.get("max_tokens"),
+                    tools=agg_kwargs.get("tools"),
+                    extra_body=agg_kwargs.get("extra_body"),
+                    **stream_kwargs,
+                    **_agg_runtime,
+                )
+                if _attempt_idx:
+                    logger.info(
+                        "MoA aggregator model %s served by fallback %s",
+                        _slot_label(aggregator),
+                        _slot_label(_attempt_slot),
+                    )
+                    self.last_aggregator_slot = dict(_attempt_slot)
+                    if self._pending_trace is not None:
+                        self._pending_trace["aggregator_slot"] = _attempt_slot
+                        self._pending_trace["aggregator_label"] = (
+                            f"{_slot_label(aggregator)} → fallback {_slot_label(_attempt_slot)}"
+                        )
+                break
+            except Exception as exc:
+                if _attempt_idx < len(aggregator_fallbacks) and _is_moa_fallback_worthy(
+                    exc, _attempt_slot, _agg_runtime
+                ):
+                    logger.warning(
+                        "MoA aggregator model %s failed, trying fallback: %s",
+                        _slot_label(_attempt_slot),
+                        exc,
+                    )
+                    continue
+                raise
         # Non-streaming path (quiet mode / eval / subagents): the aggregator
         # output is available inline, so capture it into the pending trace now.
         # Streaming path: the aggregator's raw token stream is returned to the
@@ -1024,9 +1337,11 @@ class MoAChatCompletions:
 
 
 class MoAClient:
-    def __init__(self, preset_name: str, reference_callback: Any = None):
+    def __init__(self, preset_name: str, reference_callback: Any = None, agent: Any = None):
         self.chat = type("_MoAChat", (), {})()
-        self.chat.completions = MoAChatCompletions(preset_name, reference_callback=reference_callback)
+        self.chat.completions = MoAChatCompletions(
+            preset_name, reference_callback=reference_callback, agent=agent
+        )
 
     def consume_reference_usage(self) -> Any:
         """Pop the pending reference-fan-out usage from the completions facade.

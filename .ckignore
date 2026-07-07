@@ -41,6 +41,7 @@ web/
 
 # --- ck's own index (never index the index) ---
 .ck/
+.ck-mlx/
 
 # --- Large non-code dirs ---
 locales/

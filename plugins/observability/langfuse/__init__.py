@@ -860,6 +860,8 @@ def on_pre_llm_request(
     user_message: Any = None,
     turn_id: str = "",
     api_request_id: str = "",
+    root_provider: str = "",
+    root_model: str = "",
     **_: Any,
 ) -> None:
     client = _get_langfuse()
@@ -889,8 +891,8 @@ def on_pre_llm_request(
                 task_id=task_id,
                 session_id=session_id,
                 platform=platform,
-                provider=provider,
-                model=model,
+                provider=root_provider or provider,
+                model=root_model or model,
                 api_mode=api_mode,
                 messages=input_messages,
                 client=client,
@@ -903,10 +905,13 @@ def on_pre_llm_request(
         previous = state.generations.pop(req_key, None)
         if previous is not None:
             _end_observation(previous)
+        generation_name = f"LLM call {api_call_count}"
+        if turn_type and turn_type != "user":
+            generation_name = f"{generation_name} ({turn_type})"
         state.generations[req_key] = _start_child_observation(
             state,
             client=client,
-            name=f"LLM call {api_call_count}",
+            name=generation_name,
             as_type="generation",
             input_value=_serialize_messages(input_messages),
             metadata={
@@ -914,6 +919,7 @@ def on_pre_llm_request(
                 "platform": platform,
                 "api_mode": api_mode,
                 "base_url": base_url,
+                "turn_type": turn_type or "user",
             },
             model=model,
             model_parameters={"api_mode": api_mode, "provider": provider},
@@ -927,6 +933,7 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
                      usage: Any = None, assistant_content_chars: int = 0,
                      assistant_tool_call_count: int = 0, assistant_response: Any = None,
                      turn_id: str = "", api_request_id: str = "",
+                     turn_type: str = "user", error: str = "",
                      **_: Any) -> None:
     client = _get_langfuse()
     if client is None:
@@ -1076,11 +1083,23 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
         usage_details, cost_details = {}, {}
 
     tool_count = len(output.get("tool_calls", [])) or assistant_tool_call_count
-    gen_metadata: Dict[str, Any] = {"tool_call_count": tool_count}
+    gen_metadata: Dict[str, Any] = {
+        "tool_call_count": tool_count,
+        "turn_type": turn_type or "user",
+    }
     if api_duration and api_duration > 0:
         gen_metadata["api_duration_s"] = round(api_duration, 3)
     if finish_reason:
         gen_metadata["finish_reason"] = finish_reason
+    if error:
+        # A MoA reference/aggregator call that failed and has no fallback
+        # configured never gets a normal assistant response — record the
+        # failure on the generation itself so it closes promptly with an
+        # accurate reason instead of sitting open until the turn's root trace
+        # eventually sweeps it (or the LRU eviction backstop ends it with no
+        # error context at all).
+        gen_metadata["error"] = error
+        output = {"content": None, "reasoning": None, "tool_calls": [], "error": error}
     _end_observation(
         generation,
         output=output,
@@ -1091,7 +1110,7 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
 
     has_tools = _assistant_has_tool_calls(assistant_message) if assistant_message else (assistant_tool_call_count > 0)
     has_content = bool(output.get("content"))
-    if not has_tools and has_content:
+    if not has_tools and has_content and not str(turn_type or "").startswith("moa_"):
         _finish_trace(task_key, output=output)
 
 

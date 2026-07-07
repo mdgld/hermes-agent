@@ -2134,6 +2134,8 @@ export interface MoaConfigResponse {
   presets: Record<string, {
     reference_models: MoaModelSlot[];
     aggregator: MoaModelSlot;
+    reference_fallbacks: MoaModelSlot[];
+    aggregator_fallbacks: MoaModelSlot[];
     reference_temperature: number;
     aggregator_temperature: number;
     max_tokens: number;
@@ -2141,6 +2143,8 @@ export interface MoaConfigResponse {
   }>;
   reference_models: MoaModelSlot[];
   aggregator: MoaModelSlot;
+  reference_fallbacks: MoaModelSlot[];
+  aggregator_fallbacks: MoaModelSlot[];
   reference_temperature: number;
   aggregator_temperature: number;
   max_tokens: number;

@@ -1863,6 +1863,7 @@ def _resolve_static_model_alias(
     for provider in _PROVIDER_MODELS:
         if (
             provider in current_keys
+            or provider == "moa"
             or provider in _AGGREGATOR_PROVIDERS
             or provider in _BORROWED_MODEL_PROVIDERS
         ):
@@ -1911,7 +1912,7 @@ def detect_static_provider_for_model(
     # Skip "custom" and "openrouter" — custom has no model catalog, and
     # openrouter requires an explicit model name to be useful.
     resolved_provider = _PROVIDER_ALIASES.get(name_lower, name_lower)
-    if resolved_provider not in {"custom", "openrouter"}:
+    if resolved_provider not in {"custom", "openrouter", "moa"}:
         default_models = _PROVIDER_MODELS.get(resolved_provider, [])
         if (
             resolved_provider in _PROVIDER_LABELS
@@ -1937,6 +1938,7 @@ def detect_static_provider_for_model(
     for pid, models in _PROVIDER_MODELS.items():
         if (
             pid in current_keys
+            or pid == "moa"
             or pid in _AGGREGATOR_PROVIDERS
             or pid in _BORROWED_MODEL_PROVIDERS
         ):

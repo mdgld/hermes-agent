@@ -1820,7 +1820,48 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             agent.api_key = api_key or "moa-virtual-provider"
             agent.base_url = "moa://local"
             agent._client_kwargs = {}
-            agent.client = MoAClient(agent.model or "default")
+
+            # Relay reference-fanout display events + wire agent= so the new
+            # pre/post_api_request telemetry hooks (agent/moa_loop.py) actually
+            # fire for sessions that switch INTO MoA mid-session, matching the
+            # agent_init.py cold-start path (#see agent_init.py _moa_reference_relay).
+            def _moa_reference_relay(event: str, **kwargs: Any) -> None:
+                cb = getattr(agent, "tool_progress_callback", None)
+                if cb is None:
+                    return
+                try:
+                    if event == "moa.reference":
+                        label = str(kwargs.get("label") or "")
+                        text = str(kwargs.get("text") or "")
+                        idx = kwargs.get("index")
+                        count = kwargs.get("count")
+                        cb(
+                            "moa.reference",
+                            label,
+                            text,
+                            None,
+                            moa_index=idx,
+                            moa_count=count,
+                        )
+                    elif event == "moa.aggregating":
+                        cb(
+                            "moa.aggregating",
+                            str(kwargs.get("aggregator") or ""),
+                            None,
+                            None,
+                            moa_ref_count=kwargs.get("ref_count"),
+                        )
+                except Exception:
+                    pass
+
+            if not agent.model:
+                from hermes_cli.moa_config import resolve_default_moa_preset_name
+                agent.model = resolve_default_moa_preset_name()
+            agent.client = MoAClient(
+                agent.model,
+                reference_callback=_moa_reference_relay,
+                agent=agent,
+            )
         elif api_mode == "anthropic_messages":
             from agent.anthropic_adapter import (
                 build_anthropic_client,

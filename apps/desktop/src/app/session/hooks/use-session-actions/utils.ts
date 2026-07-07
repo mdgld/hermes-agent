@@ -14,6 +14,9 @@ import {
   setCurrentPersonality,
   setCurrentProvider,
   setCurrentReasoningEffort,
+  setMoaAggregatorModel,
+  setMoaAggregatorProvider,
+  setMoaReferenceCount,
   setCurrentServiceTier,
   setCurrentUsage,
   setSessions,
@@ -279,6 +282,10 @@ export function applyRuntimeInfo(info: SessionRuntimeInfo | undefined): SessionR
     setCurrentProvider(info.provider)
     sessionState.provider = info.provider
   }
+
+  setMoaAggregatorModel(typeof info.moa_aggregator_model === 'string' ? info.moa_aggregator_model : '')
+  setMoaAggregatorProvider(typeof info.moa_aggregator_provider === 'string' ? info.moa_aggregator_provider : '')
+  setMoaReferenceCount(typeof info.moa_reference_count === 'number' ? info.moa_reference_count : 0)
 
   if (info.cwd) {
     setCurrentCwd(info.cwd)

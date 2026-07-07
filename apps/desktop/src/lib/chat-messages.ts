@@ -43,6 +43,9 @@ export type GatewayEventPayload = {
   todos?: unknown
   model?: string
   provider?: string
+  moa_aggregator_model?: string
+  moa_aggregator_provider?: string
+  moa_reference_count?: number
   reasoning_effort?: string
   service_tier?: string
   fast?: boolean
